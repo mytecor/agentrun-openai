@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,7 +41,8 @@ func run() error {
 		codexBinary   = flag.String("codex-acp-binary", env("AGENTRUN_CODEX_ACP_BINARY", "codex-acp"), "Codex ACP binary")
 		codexArgs     = flag.String("codex-acp-args", os.Getenv("AGENTRUN_CODEX_ACP_ARGS"), "comma-separated Codex ACP arguments")
 		turnTimeout   = flag.Duration("turn-timeout", envDuration("AGENTRUN_TURN_TIMEOUT", 30*time.Minute), "maximum duration of one agent turn")
-		sessionTTL    = flag.Duration("session-ttl", envDuration("AGENTRUN_SESSION_TTL", time.Hour), "idle session lifetime")
+		sessionTTL    = flag.Duration("session-ttl", envDuration("AGENTRUN_SESSION_TTL", 10*time.Minute), "idle process lifetime")
+		sessionStore  = flag.String("session-store", env("AGENTRUN_SESSION_STORE", defaultSessionStore()), "native session metadata file (empty disables persistence)")
 		shutdownGrace = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
 	)
 	flag.Parse()
@@ -70,12 +72,13 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	handler := gateway.New(gateway.Config{
-		Engines:     engines,
-		DefaultCWD:  *defaultCWD,
-		APIKey:      *apiKey,
-		TurnTimeout: *turnTimeout,
-		SessionTTL:  *sessionTTL,
-		Logger:      logger,
+		Engines:      engines,
+		DefaultCWD:   *defaultCWD,
+		APIKey:       *apiKey,
+		TurnTimeout:  *turnTimeout,
+		SessionTTL:   *sessionTTL,
+		SessionStore: *sessionStore,
+		Logger:       logger,
 	})
 	defer handler.Close()
 
@@ -106,6 +109,14 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownGrace)
 	defer cancel()
 	return server.Shutdown(shutdownCtx)
+}
+
+func defaultSessionStore() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "agentrun-openapi", "sessions.json")
 }
 
 func env(key, fallback string) string {

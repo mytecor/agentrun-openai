@@ -63,7 +63,8 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --codex-acp-binary codex-acp
 --codex-acp-args arg1,arg2
 --turn-timeout 30m
---session-ttl 1h
+--session-ttl 10m
+--session-store "/path/to/sessions.json"
 ```
 
 Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity is resolved in this order:
@@ -101,7 +102,7 @@ If none is present, the gateway creates a one-off ID and returns it as `X-Sessio
 }
 ```
 
-The gateway stores the transcript it expects for each `(session affinity, model)` pair. A linear request sends only the newly appended user turn through `agentrun.RunTurn`. If the incoming history diverges or the working directory changes, the old process is stopped and a fresh agent is started with the supplied branch as context.
+The gateway keeps an idle Claude/Codex process for 10 minutes by default. It captures the backend's native resume ID and persists it with the working directory, message count, and a SHA-256 transcript fingerprint. Message text is not written to this store. After idle eviction or a server restart, a matching Pi history resumes the native backend session and sends only the newly appended turn. If the history diverges or the working directory changes, the saved resume ID is discarded and a fresh agent is started with the supplied branch as context.
 
 Internal agent tool calls are deliberately not exposed as OpenAI `tool_calls`; only assistant text crosses the HTTP boundary.
 

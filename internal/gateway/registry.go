@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -9,21 +12,56 @@ import (
 )
 
 type sessionState struct {
-	mu         sync.Mutex
-	process    agentrun.Process
-	history    []transcriptMessage
-	cwd        string
-	lastAccess time.Time
+	mu           sync.Mutex
+	process      agentrun.Process
+	history      []transcriptMessage
+	historyCount int
+	historyHash  string
+	resumeID     string
+	cwd          string
+	lastAccess   time.Time
 }
 
 type registry struct {
 	mu       sync.Mutex
 	sessions map[string]*sessionState
 	ttl      time.Duration
+	store    *sessionStore
 }
 
-func newRegistry(ttl time.Duration) *registry {
-	return &registry{sessions: make(map[string]*sessionState), ttl: ttl}
+func newRegistry(ttl time.Duration, storePath string) (*registry, error) {
+	store, err := newSessionStore(storePath)
+	r := &registry{sessions: make(map[string]*sessionState), ttl: ttl, store: store}
+	for key, saved := range store.recordsSnapshot() {
+		r.sessions[key] = &sessionState{
+			resumeID: saved.ResumeID, cwd: saved.CWD, historyCount: saved.HistoryCount,
+			historyHash: saved.HistoryHash, lastAccess: time.Now(),
+		}
+	}
+	return r, err
+}
+
+func (s *sessionState) persistedHistoryCount() int {
+	if s.history != nil {
+		return len(s.history)
+	}
+	return s.historyCount
+}
+
+func (s *sessionState) matchesHistoryPrefix(messages []transcriptMessage) bool {
+	if s.history != nil {
+		return hasPrefix(messages, s.history)
+	}
+	if s.historyCount <= 0 || s.historyCount > len(messages) || s.historyHash == "" {
+		return false
+	}
+	return transcriptHash(messages[:s.historyCount]) == s.historyHash
+}
+
+func transcriptHash(messages []transcriptMessage) string {
+	data, _ := json.Marshal(messages)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 // lock returns the state with its mutex held. Taking the state lock while the
@@ -48,12 +86,11 @@ func (r *registry) evictIdle() {
 	cutoff := time.Now().Add(-r.ttl)
 	var stale []*sessionState
 	r.mu.Lock()
-	for key, state := range r.sessions {
+	for _, state := range r.sessions {
 		if !state.mu.TryLock() {
 			continue
 		}
 		if state.lastAccess.Before(cutoff) {
-			delete(r.sessions, key)
 			stale = append(stale, state)
 		} else {
 			state.mu.Unlock()
@@ -62,6 +99,7 @@ func (r *registry) evictIdle() {
 	r.mu.Unlock()
 	for _, state := range stale {
 		stopProcess(state.process)
+		state.process = nil
 		state.mu.Unlock()
 	}
 }

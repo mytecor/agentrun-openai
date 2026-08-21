@@ -10,19 +10,21 @@ import (
 )
 
 type collector struct {
-	w             http.ResponseWriter
-	stream        bool
-	id            string
-	created       int64
-	model         string
-	text          strings.Builder
-	usage         completionUsage
-	sawDelta      bool
-	streamStarted bool
+	w              http.ResponseWriter
+	stream         bool
+	id             string
+	created        int64
+	model          string
+	text           strings.Builder
+	usage          completionUsage
+	sawDelta       bool
+	streamStarted  bool
+	resumeID       string
+	waitingForInit bool
 }
 
-func newCollector(w http.ResponseWriter, stream bool, id string, created int64, model string) *collector {
-	return &collector{w: w, stream: stream, id: id, created: created, model: model}
+func newCollector(w http.ResponseWriter, stream bool, id string, created int64, model string, resumed bool) *collector {
+	return &collector{w: w, stream: stream, id: id, created: created, model: model, waitingForInit: resumed}
 }
 
 func (c *collector) startStream() error {
@@ -39,10 +41,21 @@ func (c *collector) startStream() error {
 
 func (c *collector) handle(message agentrun.Message) error {
 	switch message.Type {
+	case agentrun.MessageInit:
+		if message.ResumeID != "" {
+			c.resumeID = message.ResumeID
+		}
+		c.waitingForInit = false
 	case agentrun.MessageTextDelta:
+		if c.waitingForInit {
+			return nil
+		}
 		c.sawDelta = true
 		c.appendText(message.Content)
 	case agentrun.MessageText:
+		if c.waitingForInit {
+			return nil
+		}
 		if !c.sawDelta {
 			c.appendText(message.Content)
 		}

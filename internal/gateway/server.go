@@ -21,12 +21,13 @@ import (
 )
 
 type Config struct {
-	Engines     map[string]agentrun.Engine
-	DefaultCWD  string
-	APIKey      string
-	TurnTimeout time.Duration
-	SessionTTL  time.Duration
-	Logger      *slog.Logger
+	Engines      map[string]agentrun.Engine
+	DefaultCWD   string
+	APIKey       string
+	TurnTimeout  time.Duration
+	SessionTTL   time.Duration
+	SessionStore string
+	Logger       *slog.Logger
 }
 
 type Server struct {
@@ -49,7 +50,11 @@ func New(config Config) *Server {
 		models = append(models, model)
 	}
 	sort.Strings(models)
-	s := &Server{config: config, models: models, registry: newRegistry(config.SessionTTL), stop: make(chan struct{})}
+	registry, err := newRegistry(config.SessionTTL, config.SessionStore)
+	if err != nil {
+		config.Logger.Warn("load session store", "error", err, "path", config.SessionStore)
+	}
+	s := &Server{config: config, models: models, registry: registry, stop: make(chan struct{})}
 	go s.janitor()
 	return s
 }
@@ -163,15 +168,23 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer state.mu.Unlock()
 	state.lastAccess = time.Now()
 
-	reset := state.process == nil || state.cwd != cwd || !hasPrefix(messages, state.history)
+	continuation := state.cwd == cwd && state.matchesHistoryPrefix(messages)
+	resume := state.process == nil && state.resumeID != "" && continuation
+	reset := !continuation || (state.process == nil && !resume)
 	var delta []transcriptMessage
 	if reset {
 		delta = messages
 		stopProcess(state.process)
 		state.process = nil
 		state.history = nil
+		state.historyCount = 0
+		state.historyHash = ""
+		state.resumeID = ""
+		if err := s.registry.store.delete(sessionID + ":" + request.Model); err != nil {
+			s.logError("delete saved session", err, request.Model, sessionID)
+		}
 	} else {
-		delta = messages[len(state.history):]
+		delta = messages[state.persistedHistoryCount():]
 	}
 	prompt, err := turnPrompt(delta)
 	if err != nil {
@@ -187,6 +200,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
+		if resume {
+			options[agentrun.OptionResumeID] = state.resumeID
+		}
 		if system := systemPrompt(messages); system != "" {
 			options[agentrun.OptionSystemPrompt] = system
 		}
@@ -202,7 +218,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	completionID := randomID("chatcmpl-")
 	created := time.Now().Unix()
-	collector := newCollector(w, request.Stream, completionID, created, request.Model)
+	collector := newCollector(w, request.Stream, completionID, created, request.Model, resume)
 	if request.Stream {
 		if err := collector.startStream(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error", "streaming_unsupported")
@@ -233,7 +249,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	assistant := transcriptMessage{Role: "assistant", Content: collector.text.String()}
 	state.history = append(append([]transcriptMessage(nil), messages...), assistant)
+	state.historyCount = len(state.history)
+	state.historyHash = transcriptHash(state.history)
+	if collector.resumeID != "" {
+		state.resumeID = collector.resumeID
+	}
 	state.lastAccess = time.Now()
+	if state.resumeID != "" {
+		err := s.registry.store.put(sessionID+":"+request.Model, persistedSession{
+			ResumeID: state.resumeID, CWD: state.cwd, HistoryCount: state.historyCount, HistoryHash: state.historyHash,
+		})
+		if err != nil {
+			s.logError("save session", err, request.Model, sessionID)
+		}
+	}
 	if request.Stream {
 		collector.finishStream()
 		return

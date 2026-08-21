@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,8 +28,13 @@ type fakeEngine struct {
 func (e *fakeEngine) Validate() error { return nil }
 
 func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...agentrun.Option) (agentrun.Process, error) {
-	p := &fakeProcess{output: make(chan agentrun.Message, 16)}
 	e.mu.Lock()
+	resumeID := session.Options[agentrun.OptionResumeID]
+	resumed := resumeID != ""
+	if resumeID == "" {
+		resumeID = fmt.Sprintf("resume-%d", len(e.procs)+1)
+	}
+	p := &fakeProcess{output: make(chan agentrun.Message, 16), resumeID: resumeID, replayOnStart: resumed}
 	e.sessions = append(e.sessions, session)
 	e.procs = append(e.procs, p)
 	e.mu.Unlock()
@@ -34,10 +42,12 @@ func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...age
 }
 
 type fakeProcess struct {
-	mu      sync.Mutex
-	output  chan agentrun.Message
-	prompts []string
-	stopped bool
+	mu            sync.Mutex
+	output        chan agentrun.Message
+	prompts       []string
+	stopped       bool
+	resumeID      string
+	replayOnStart bool
 }
 
 func (p *fakeProcess) Output() <-chan agentrun.Message { return p.output }
@@ -46,6 +56,11 @@ func (p *fakeProcess) Send(_ context.Context, prompt string) error {
 	p.mu.Lock()
 	p.prompts = append(p.prompts, prompt)
 	p.mu.Unlock()
+	if p.replayOnStart {
+		p.output <- agentrun.Message{Type: agentrun.MessageText, Content: "replayed old answer"}
+		p.replayOnStart = false
+	}
+	p.output <- agentrun.Message{Type: agentrun.MessageInit, ResumeID: p.resumeID}
 	p.output <- agentrun.Message{Type: agentrun.MessageTextDelta, Content: "answer: "}
 	p.output <- agentrun.Message{Type: agentrun.MessageTextDelta, Content: prompt}
 	p.output <- agentrun.Message{Type: agentrun.MessageText, Content: "answer: " + prompt}
@@ -63,13 +78,34 @@ func (p *fakeProcess) Wait() error { return nil }
 func (p *fakeProcess) Err() error  { return nil }
 
 func newTestServer(engine *fakeEngine) *Server {
+	return newTestServerWithStore(engine, "")
+}
+
+func newTestServerWithStore(engine *fakeEngine, storePath string) *Server {
 	return New(Config{
-		Engines:     map[string]agentrun.Engine{"test-agent": engine},
-		DefaultCWD:  "/tmp",
-		TurnTimeout: time.Second,
-		SessionTTL:  time.Hour,
-		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:      map[string]agentrun.Engine{"test-agent": engine},
+		DefaultCWD:   "/tmp",
+		TurnTimeout:  time.Second,
+		SessionTTL:   time.Hour,
+		SessionStore: storePath,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+}
+
+func continuationPayload(t *testing.T, user, answer, next string) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"model": "test-agent",
+		"messages": []map[string]string{
+			{"role": "user", "content": user},
+			{"role": "assistant", "content": answer},
+			{"role": "user", "content": next},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
 }
 
 func doChat(t *testing.T, server *Server, payload string, headers map[string]string) *httptest.ResponseRecorder {
@@ -82,6 +118,75 @@ func doChat(t *testing.T, server *Server, payload string, headers map[string]str
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, req)
 	return recorder
+}
+
+func TestIdleEvictionResumesNativeSession(t *testing.T) {
+	engine := &fakeEngine{}
+	server := newTestServer(engine)
+	defer server.Close()
+
+	first := doChat(t, server, `{"model":"test-agent","messages":[{"role":"user","content":"first"}]}`, map[string]string{"X-Session-Affinity": "idle"})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, body = %s", first.Code, first.Body.String())
+	}
+	state := server.registry.lock("idle:test-agent")
+	state.lastAccess = time.Now().Add(-2 * time.Hour)
+	state.mu.Unlock()
+	server.registry.evictIdle()
+
+	second := doChat(t, server, continuationPayload(t, "first", "answer: first", "second"), map[string]string{"X-Session-Affinity": "idle"})
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d, body = %s", second.Code, second.Body.String())
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.sessions) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(engine.sessions))
+	}
+	if got := engine.sessions[1].Options[agentrun.OptionResumeID]; got != "resume-1" {
+		t.Fatalf("resume id = %q, want resume-1", got)
+	}
+	if got := engine.procs[1].prompts; len(got) != 1 || got[0] != "second" {
+		t.Fatalf("resumed prompts = %#v, want [second]", got)
+	}
+	if strings.Contains(second.Body.String(), "replayed old answer") {
+		t.Fatalf("response contains replayed output: %s", second.Body.String())
+	}
+}
+
+func TestSessionStoreResumesAfterServerRestartWithoutTranscriptText(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	firstEngine := &fakeEngine{}
+	firstServer := newTestServerWithStore(firstEngine, storePath)
+	first := doChat(t, firstServer, `{"model":"test-agent","messages":[{"role":"user","content":"private prompt"}]}`, map[string]string{"X-Session-Affinity": "restart"})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, body = %s", first.Code, first.Body.String())
+	}
+	firstServer.Close()
+
+	stored, err := os.ReadFile(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stored), "private prompt") || strings.Contains(string(stored), "answer: private prompt") {
+		t.Fatalf("session store contains transcript text: %s", stored)
+	}
+
+	secondEngine := &fakeEngine{}
+	secondServer := newTestServerWithStore(secondEngine, storePath)
+	defer secondServer.Close()
+	second := doChat(t, secondServer, continuationPayload(t, "private prompt", "answer: private prompt", "continue"), map[string]string{"X-Session-Affinity": "restart"})
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d, body = %s", second.Code, second.Body.String())
+	}
+	secondEngine.mu.Lock()
+	defer secondEngine.mu.Unlock()
+	if len(secondEngine.sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(secondEngine.sessions))
+	}
+	if got := secondEngine.sessions[0].Options[agentrun.OptionResumeID]; got != "resume-1" {
+		t.Fatalf("resume id = %q, want resume-1", got)
+	}
 }
 
 func TestLinearConversationReusesProcessAndSendsOnlyNewTurn(t *testing.T) {
