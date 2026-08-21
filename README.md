@@ -11,7 +11,9 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 Built-in models:
 
 - `claude-code` uses agentrun's persistent Claude Code streaming backend.
-- `codex` uses agentrun's persistent ACP backend and a `codex-acp` executable.
+- `codex/<model-id>` uses agentrun's persistent ACP backend and a `codex-acp` executable. The concrete models are discovered from the authenticated Codex app-server whenever `/models` is requested.
+
+The `codex` ID delegates model choice to the Codex CLI default and remains available alongside the discovered concrete models. Claude Code supports selecting a model internally, but its CLI currently has no non-interactive model-list command, so only the default `claude-code` entry is advertised.
 
 ## Install
 
@@ -61,6 +63,7 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --default-cwd /absolute/path/to/project
 --allowed-root /absolute/path/to/projects
 --claude-binary claude
+--codex-binary codex
 --codex-acp-binary codex-acp
 --codex-acp-args arg1,arg2
 --turn-timeout 30m
@@ -110,7 +113,7 @@ Then mark the provider for discovery in `~/.pi/agent/models.json`. Pi obtains ev
 }
 ```
 
-To make every discovered agent model selectable, add `"agentrun/*"` to `enabledModels` in `~/.pi/agent/settings.json`. Run `/config:model-discovery-refresh` inside Pi after changing the server's model list.
+To make every discovered agent model selectable, add `"agentrun/**"` to `enabledModels` in `~/.pi/agent/settings.json`. The double glob also matches nested IDs such as `agentrun/codex/gpt-5.6-sol`. Run `/config:model-discovery-refresh` inside Pi after changing the server's model list.
 
 The gateway keeps an idle Claude/Codex process for 10 minutes by default. It captures the backend's native resume ID and persists it with the working directory, message count, and a SHA-256 transcript fingerprint. Message text is not written to this store. After idle eviction or a server restart, a matching Pi history resumes the native backend session and sends only the newly appended turn. If the native session has expired or been deleted, the gateway automatically retries once with the complete supplied conversation. If the history diverges or the working directory changes, the saved resume ID is discarded and a fresh agent is started with the supplied branch as context.
 

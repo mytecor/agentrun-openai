@@ -21,15 +21,16 @@ import (
 )
 
 type Config struct {
-	Engines      map[string]agentrun.Engine
-	ModelDetails map[string]ModelDetails
-	DefaultCWD   string
-	AllowedRoots []string
-	APIKey       string
-	TurnTimeout  time.Duration
-	SessionTTL   time.Duration
-	SessionStore string
-	Logger       *slog.Logger
+	Engines        map[string]agentrun.Engine
+	ModelDetails   map[string]ModelDetails
+	DiscoverModels func(context.Context) ([]DiscoveredModel, error)
+	DefaultCWD     string
+	AllowedRoots   []string
+	APIKey         string
+	TurnTimeout    time.Duration
+	SessionTTL     time.Duration
+	SessionStore   string
+	Logger         *slog.Logger
 }
 
 type ModelDetails struct {
@@ -38,10 +39,26 @@ type ModelDetails struct {
 	MaxTokens     int
 }
 
+type DiscoveredModel struct {
+	ID           string
+	Engine       string
+	BackendModel string
+	Details      ModelDetails
+}
+
+type modelRoute struct {
+	engine       agentrun.Engine
+	engineID     string
+	backendModel string
+	details      ModelDetails
+}
+
 type Server struct {
 	config   Config
 	models   []string
 	registry *registry
+	routesMu sync.RWMutex
+	routes   map[string]modelRoute
 	stop     chan struct{}
 	close    sync.Once
 }
@@ -62,7 +79,7 @@ func New(config Config) *Server {
 	if err != nil {
 		config.Logger.Warn("load session store", "error", err, "path", config.SessionStore)
 	}
-	s := &Server{config: config, models: models, registry: registry, stop: make(chan struct{})}
+	s := &Server{config: config, models: models, registry: registry, routes: make(map[string]modelRoute), stop: make(chan struct{})}
 	go s.janitor()
 	return s
 }
@@ -103,7 +120,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	case r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models"):
-		s.handleModels(w)
+		s.handleModels(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		s.handleChat(w, r)
 	default:
@@ -118,21 +135,82 @@ func (s *Server) authorized(r *http.Request) bool {
 	return r.Header.Get("Authorization") == "Bearer "+s.config.APIKey
 }
 
-func (s *Server) handleModels(w http.ResponseWriter) {
-	data := make([]map[string]any, 0, len(s.models))
+func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+	discovered := s.discoverModels(r.Context())
+	data := make([]map[string]any, 0, len(s.models)+len(discovered))
 	for _, model := range s.models {
-		details := s.config.ModelDetails[model]
-		name := details.Name
-		if name == "" {
-			name = model
-		}
-		data = append(data, map[string]any{
-			"id": model, "object": "model", "created": 0, "owned_by": "agentrun",
-			"name": name, "context_window": details.ContextWindow, "max_tokens": details.MaxTokens,
-		})
+		data = append(data, modelObject(model, s.config.ModelDetails[model]))
+	}
+	for _, model := range discovered {
+		data = append(data, modelObject(model.ID, model.Details))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+}
+
+func modelObject(id string, details ModelDetails) map[string]any {
+	name := details.Name
+	if name == "" {
+		name = id
+	}
+	return map[string]any{
+		"id": id, "object": "model", "created": 0, "owned_by": "agentrun",
+		"name": name, "context_window": details.ContextWindow, "max_tokens": details.MaxTokens,
+	}
+}
+
+func (s *Server) discoverModels(ctx context.Context) []DiscoveredModel {
+	if s.config.DiscoverModels == nil {
+		return nil
+	}
+	models, err := s.config.DiscoverModels(ctx)
+	if err != nil {
+		s.config.Logger.Warn("discover backend models", "error", err)
+		s.routesMu.RLock()
+		defer s.routesMu.RUnlock()
+		cached := make([]DiscoveredModel, 0, len(s.routes))
+		for id, route := range s.routes {
+			cached = append(cached, DiscoveredModel{ID: id, Engine: route.engineID, BackendModel: route.backendModel, Details: route.details})
+		}
+		sort.Slice(cached, func(i, j int) bool { return cached[i].ID < cached[j].ID })
+		return cached
+	}
+	routes := make(map[string]modelRoute, len(models))
+	valid := models[:0]
+	for _, model := range models {
+		engine := s.config.Engines[model.Engine]
+		if engine == nil || model.ID == "" || model.BackendModel == "" {
+			continue
+		}
+		routes[model.ID] = modelRoute{engine: engine, engineID: model.Engine, backendModel: model.BackendModel, details: model.Details}
+		valid = append(valid, model)
+	}
+	s.routesMu.Lock()
+	s.routes = routes
+	s.routesMu.Unlock()
+	sort.Slice(valid, func(i, j int) bool { return valid[i].ID < valid[j].ID })
+	return valid
+}
+
+func (s *Server) resolveModel(id string) (modelRoute, bool) {
+	if engine := s.config.Engines[id]; engine != nil {
+		return modelRoute{engine: engine, engineID: id, details: s.config.ModelDetails[id]}, true
+	}
+	s.routesMu.RLock()
+	route, ok := s.routes[id]
+	s.routesMu.RUnlock()
+	if ok {
+		return route, true
+	}
+	engineID, backendModel, found := strings.Cut(id, "/")
+	if !found || backendModel == "" {
+		return modelRoute{}, false
+	}
+	engine := s.config.Engines[engineID]
+	if engine == nil {
+		return modelRoute{}, false
+	}
+	return modelRoute{engine: engine, engineID: engineID, backendModel: backendModel}, true
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -147,8 +225,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "request body must contain exactly one JSON object", "invalid_request_error", "invalid_json")
 		return
 	}
-	engine := s.config.Engines[request.Model]
-	if engine == nil {
+	route, ok := s.resolveModel(request.Model)
+	if !ok {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q was not found", request.Model), "invalid_request_error", "model_not_found")
 		return
 	}
@@ -227,7 +305,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		if system := systemPrompt(messages); system != "" {
 			options[agentrun.OptionSystemPrompt] = system
 		}
-		process, startErr := engine.Start(ctx, agentrun.Session{CWD: cwd, Prompt: turnPrompt, Options: options})
+		process, startErr := route.engine.Start(ctx, agentrun.Session{CWD: cwd, Model: route.backendModel, Prompt: turnPrompt, Options: options})
 		if startErr != nil {
 			return startErr
 		}

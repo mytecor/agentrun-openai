@@ -390,6 +390,42 @@ func TestModelsAreOpenAIShaped(t *testing.T) {
 	}
 }
 
+func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
+	engine := &fakeEngine{}
+	server := New(Config{
+		Engines: map[string]agentrun.Engine{"codex": engine},
+		ModelDetails: map[string]ModelDetails{
+			"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
+		},
+		DiscoverModels: func(context.Context) ([]DiscoveredModel, error) {
+			return []DiscoveredModel{{
+				ID: "codex/gpt-test", Engine: "codex", BackendModel: "gpt-test",
+				Details: ModelDetails{Name: "Codex · GPT Test", ContextWindow: 1234, MaxTokens: 567},
+			}}, nil
+		},
+		DefaultCWD: "/tmp", TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	defer server.Close()
+
+	modelsRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	modelsResponse := httptest.NewRecorder()
+	server.ServeHTTP(modelsResponse, modelsRequest)
+	if body := modelsResponse.Body.String(); !strings.Contains(body, `"id":"codex/gpt-test"`) || !strings.Contains(body, `"id":"codex"`) {
+		t.Fatalf("models body = %s", body)
+	}
+
+	response := doChat(t, server, `{"model":"codex/gpt-test","messages":[{"role":"user","content":"hello"}]}`, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test" {
+		t.Fatalf("sessions = %#v, want backend model gpt-test", engine.sessions)
+	}
+}
+
 func TestAllowedRootsPermitChildrenAndRejectOutside(t *testing.T) {
 	allowed := t.TempDir()
 	child := filepath.Join(allowed, "project")
