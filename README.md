@@ -11,9 +11,10 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 Built-in models:
 
 - `claude-code` uses agentrun's persistent Claude Code streaming backend.
-- `codex/<model-id>` uses agentrun's persistent ACP backend and a `codex-acp` executable. The concrete models are discovered from the authenticated Codex app-server whenever `/models` is requested.
+- `codex/<model-id>` uses agentrun's persistent ACP backend and a `codex-acp` executable.
+- `claude-code/<model-id>` uses agentrun's persistent Claude Code backend with an explicitly selected model.
 
-The `codex` ID delegates model choice to the Codex CLI default and remains available alongside the discovered concrete models. Claude Code supports selecting a model internally, but its CLI currently has no non-interactive model-list command, so only the default `claude-code` entry is advertised.
+Concrete Codex and Claude models are discovered through agentrun's public model-catalog API whenever `/models` is requested. Codex effort variants are grouped into one public entry per base model: select the reasoning level separately with the OpenAI-compatible `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, or `max`). The gateway uses `medium` by default and routes the request to the exact ACP model ID such as `gpt-5.6-sol[high]`. The `codex` and `claude-code` IDs still delegate model choice to each backend's default and remain available alongside the discovered models. If discovery temporarily fails, the gateway retains the last known catalog; if no catalog has been obtained yet, the backend-default entry remains usable.
 
 ## Install
 
@@ -63,7 +64,6 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --default-cwd /absolute/path/to/project
 --allowed-root /absolute/path/to/projects
 --claude-binary claude
---codex-binary codex
 --codex-acp-binary codex-acp
 --codex-acp-args arg1,arg2
 --turn-timeout 30m
@@ -106,14 +106,15 @@ Then mark the provider for discovery in `~/.pi/agent/models.json`. Pi obtains ev
       },
       "compat": {
         "sendSessionAffinityHeaders": true,
-        "sessionAffinityFormat": "openai"
+        "sessionAffinityFormat": "openai",
+        "supportsReasoningEffort": true
       }
     }
   }
 }
 ```
 
-To make every discovered agent model selectable, add `"agentrun/**"` to `enabledModels` in `~/.pi/agent/settings.json`. The double glob also matches nested IDs such as `agentrun/codex/gpt-5.6-sol`. Run `/config:model-discovery-refresh` inside Pi after changing the server's model list.
+To make every discovered agent model selectable, add `"agentrun/**"` to `enabledModels` in `~/.pi/agent/settings.json`. The double glob also matches nested IDs such as `agentrun/codex/gpt-5.6-sol`. Pi's thinking-level selector is sent as `reasoning_effort`; changing it creates a separate native session so a conversation never silently keeps the previous effort. If the discovery extension supplies a generic `thinkingLevelMap`, override it per discovered model with the persistent provider-level `modelOverrides` in `models.json`; do not edit the installed extension under `node_modules`. Run `/config:model-discovery-refresh` inside Pi after changing the server's model list.
 
 The gateway keeps an idle Claude/Codex process for 10 minutes by default. It captures the backend's native resume ID and persists it with the working directory, message count, and a SHA-256 transcript fingerprint. Message text is not written to this store. After idle eviction or a server restart, a matching Pi history resumes the native backend session and sends only the newly appended turn. If the native session has expired or been deleted, the gateway automatically retries once with the complete supplied conversation. If the history diverges or the working directory changes, the saved resume ID is discarded and a fresh agent is started with the supplied branch as context.
 

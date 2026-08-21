@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,9 +26,21 @@ type fakeEngine struct {
 	procs           []*fakeProcess
 	failResumeStart bool
 	failResumeTurn  bool
+	models          []agentrun.ModelInfo
+	listErr         error
+	effectiveModel  string
 }
 
 func (e *fakeEngine) Validate() error { return nil }
+
+func (e *fakeEngine) ListModels(_ context.Context, session agentrun.Session) ([]agentrun.ModelInfo, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.listErr != nil {
+		return nil, e.listErr
+	}
+	return agentrun.CloneModelCatalog(e.models), nil
+}
 
 func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...agentrun.Option) (agentrun.Process, error) {
 	e.mu.Lock()
@@ -44,7 +57,10 @@ func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...age
 	}
 	p := &fakeProcess{
 		output: make(chan agentrun.Message, 16), resumeID: resumeID, replayOnStart: resumed,
-		missingOnStart: resumed && e.failResumeTurn,
+		missingOnStart: resumed && e.failResumeTurn, model: session.Model,
+	}
+	if e.effectiveModel != "" {
+		p.model = e.effectiveModel
 	}
 	e.procs = append(e.procs, p)
 	return p, nil
@@ -58,6 +74,7 @@ type fakeProcess struct {
 	resumeID       string
 	replayOnStart  bool
 	missingOnStart bool
+	model          string
 }
 
 func (p *fakeProcess) Output() <-chan agentrun.Message { return p.output }
@@ -75,7 +92,13 @@ func (p *fakeProcess) Send(_ context.Context, prompt string) error {
 		p.output <- agentrun.Message{Type: agentrun.MessageText, Content: "replayed old answer"}
 		p.replayOnStart = false
 	}
-	p.output <- agentrun.Message{Type: agentrun.MessageInit, ResumeID: p.resumeID}
+	init := &agentrun.InitMeta{}
+	if p.model == "" {
+		init = nil
+	} else {
+		init.Model = p.model
+	}
+	p.output <- agentrun.Message{Type: agentrun.MessageInit, ResumeID: p.resumeID, Init: init}
 	p.output <- agentrun.Message{Type: agentrun.MessageTextDelta, Content: "answer: "}
 	p.output <- agentrun.Message{Type: agentrun.MessageTextDelta, Content: prompt}
 	p.output <- agentrun.Message{Type: agentrun.MessageText, Content: "answer: " + prompt}
@@ -391,17 +414,15 @@ func TestModelsAreOpenAIShaped(t *testing.T) {
 }
 
 func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
-	engine := &fakeEngine{}
+	engine := &fakeEngine{models: []agentrun.ModelInfo{
+		{ID: "gpt-test[low]", Name: "GPT Test (low)"},
+		{ID: "gpt-test[medium]", Name: "GPT Test (medium)"},
+		{ID: "gpt-test[high]", Name: "GPT Test (high)"},
+	}}
 	server := New(Config{
 		Engines: map[string]agentrun.Engine{"codex": engine},
 		ModelDetails: map[string]ModelDetails{
 			"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
-		},
-		DiscoverModels: func(context.Context) ([]DiscoveredModel, error) {
-			return []DiscoveredModel{{
-				ID: "codex/gpt-test", Engine: "codex", BackendModel: "gpt-test",
-				Details: ModelDetails{Name: "Codex · GPT Test", ContextWindow: 1234, MaxTokens: 567},
-			}}, nil
 		},
 		DefaultCWD: "/tmp", TurnTimeout: time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -411,7 +432,9 @@ func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
 	modelsRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	modelsResponse := httptest.NewRecorder()
 	server.ServeHTTP(modelsResponse, modelsRequest)
-	if body := modelsResponse.Body.String(); !strings.Contains(body, `"id":"codex/gpt-test"`) || !strings.Contains(body, `"id":"codex"`) {
+	if body := modelsResponse.Body.String(); !strings.Contains(body, `"id":"codex/gpt-test"`) ||
+		!strings.Contains(body, `"id":"codex"`) || !strings.Contains(body, `"reasoning_efforts"`) ||
+		strings.Contains(body, `"id":"codex/gpt-test[high]"`) {
 		t.Fatalf("models body = %s", body)
 	}
 
@@ -421,8 +444,110 @@ func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test" {
-		t.Fatalf("sessions = %#v, want backend model gpt-test", engine.sessions)
+	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test[medium]" {
+		t.Fatalf("sessions = %#v, want backend model gpt-test[medium]", engine.sessions)
+	}
+}
+
+func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
+	engine := &fakeEngine{models: []agentrun.ModelInfo{
+		{ID: "gpt-test[medium]", Name: "GPT Test (medium)"},
+		{ID: "gpt-test[high]", Name: "GPT Test (high)"},
+	}}
+	server := New(Config{
+		Engines: map[string]agentrun.Engine{"codex": engine}, DefaultCWD: "/tmp",
+		TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	defer server.Close()
+
+	headers := map[string]string{"X-Session-Affinity": "same"}
+	high := doChat(t, server, `{"model":"codex/gpt-test","reasoning_effort":"high","messages":[{"role":"user","content":"high"}]}`, headers)
+	medium := doChat(t, server, `{"model":"codex/gpt-test","reasoning_effort":"medium","messages":[{"role":"user","content":"medium"}]}`, headers)
+	if high.Code != http.StatusOK || medium.Code != http.StatusOK {
+		t.Fatalf("high = %d %s; medium = %d %s", high.Code, high.Body.String(), medium.Code, medium.Body.String())
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.sessions) != 2 || engine.sessions[0].Model != "gpt-test[high]" || engine.sessions[1].Model != "gpt-test[medium]" {
+		t.Fatalf("sessions = %#v", engine.sessions)
+	}
+}
+
+func TestUnsupportedReasoningEffortRejected(t *testing.T) {
+	engine := &fakeEngine{models: []agentrun.ModelInfo{{ID: "gpt-test[medium]", Name: "GPT Test (medium)"}}}
+	server := New(Config{
+		Engines: map[string]agentrun.Engine{"codex": engine}, DefaultCWD: "/tmp",
+		TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	defer server.Close()
+	server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	response := doChat(t, server, `{"model":"codex/gpt-test","reasoning_effort":"ultra","messages":[{"role":"user","content":"hello"}]}`, nil)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"reasoning_effort_not_supported"`) {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDiscoveryIncludesClaudeAndRetainsLastCatalogOnFailure(t *testing.T) {
+	engine := &fakeEngine{models: []agentrun.ModelInfo{
+		{ID: "default", Name: "Default", Aliases: []string{"claude-sonnet-5"}},
+		{ID: "sonnet", Name: "Sonnet", Aliases: []string{"claude-sonnet-5"}},
+	}}
+	server := New(Config{
+		Engines:      map[string]agentrun.Engine{"claude-code": engine},
+		ModelDetails: map[string]ModelDetails{"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000}},
+		DefaultCWD:   "/tmp", TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	defer server.Close()
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	first := httptest.NewRecorder()
+	server.ServeHTTP(first, request)
+	if !strings.Contains(first.Body.String(), `"id":"claude-code/sonnet"`) ||
+		strings.Contains(first.Body.String(), `"id":"claude-code/default"`) ||
+		!strings.Contains(first.Body.String(), `"thinking_level_map"`) {
+		t.Fatalf("first models body = %s", first.Body.String())
+	}
+	chat := doChat(t, server, `{"model":"claude-code/sonnet","reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`, nil)
+	if chat.Code != http.StatusOK {
+		t.Fatalf("chat status = %d, body = %s", chat.Code, chat.Body.String())
+	}
+	engine.mu.Lock()
+	if got := engine.sessions[0].Options[agentrun.OptionEffort]; got != "high" {
+		engine.mu.Unlock()
+		t.Fatalf("Claude effort = %q, want high", got)
+	}
+	engine.mu.Unlock()
+
+	engine.mu.Lock()
+	engine.listErr = errors.New("temporary discovery failure")
+	engine.mu.Unlock()
+	second := httptest.NewRecorder()
+	server.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if !strings.Contains(second.Body.String(), `"id":"claude-code/sonnet"`) {
+		t.Fatalf("cached models body = %s", second.Body.String())
+	}
+}
+
+func TestDiscoveredRouteRejectsUnexpectedEffectiveModel(t *testing.T) {
+	engine := &fakeEngine{
+		models:         []agentrun.ModelInfo{{ID: "gpt-test[medium]"}},
+		effectiveModel: "gpt-other",
+	}
+	server := New(Config{
+		Engines: map[string]agentrun.Engine{"codex": engine}, DefaultCWD: "/tmp",
+		TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	defer server.Close()
+	server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	response := doChat(t, server, `{"model":"codex/gpt-test","messages":[{"role":"user","content":"hello"}]}`, nil)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "backend selected model") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 

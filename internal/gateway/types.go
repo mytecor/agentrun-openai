@@ -3,10 +3,11 @@ package gateway
 import "encoding/json"
 
 type chatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	Stream    bool          `json:"stream"`
-	SessionID string        `json:"session_id,omitempty"`
+	Model           string        `json:"model"`
+	Messages        []chatMessage `json:"messages"`
+	Stream          bool          `json:"stream"`
+	SessionID       string        `json:"session_id,omitempty"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {

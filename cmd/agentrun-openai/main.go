@@ -21,7 +21,6 @@ import (
 	"github.com/dmora/agentrun/engine/cli"
 	"github.com/dmora/agentrun/engine/cli/claude"
 
-	"github.com/mytecor/agentrun-openai/internal/discovery"
 	"github.com/mytecor/agentrun-openai/internal/gateway"
 )
 
@@ -40,7 +39,6 @@ func run() error {
 		apiKey         = flag.String("api-key", os.Getenv("AGENTRUN_API_KEY"), "optional bearer token")
 		defaultCWD     = flag.String("default-cwd", os.Getenv("AGENTRUN_DEFAULT_CWD"), "default agent working directory")
 		claudeBinary   = flag.String("claude-binary", env("AGENTRUN_CLAUDE_BINARY", "claude"), "Claude Code binary")
-		codexBinary    = flag.String("codex-binary", env("AGENTRUN_CODEX_BINARY", "codex"), "Codex CLI binary used for model discovery")
 		codexACPBinary = flag.String("codex-acp-binary", env("AGENTRUN_CODEX_ACP_BINARY", "codex-acp"), "Codex ACP binary")
 		codexArgs      = flag.String("codex-acp-args", os.Getenv("AGENTRUN_CODEX_ACP_ARGS"), "comma-separated Codex ACP arguments")
 		turnTimeout    = flag.Duration("turn-timeout", envDuration("AGENTRUN_TURN_TIMEOUT", 30*time.Minute), "maximum duration of one agent turn")
@@ -84,11 +82,6 @@ func run() error {
 		ModelDetails: map[string]gateway.ModelDetails{
 			"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000},
 			"codex":       {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
-		},
-		DiscoverModels: func(ctx context.Context) ([]gateway.DiscoveredModel, error) {
-			discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			return discovery.CodexModels(discoveryCtx, *codexBinary)
 		},
 		DefaultCWD:   *defaultCWD,
 		AllowedRoots: resolvedRoots,

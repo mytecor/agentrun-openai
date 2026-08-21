@@ -21,16 +21,15 @@ import (
 )
 
 type Config struct {
-	Engines        map[string]agentrun.Engine
-	ModelDetails   map[string]ModelDetails
-	DiscoverModels func(context.Context) ([]DiscoveredModel, error)
-	DefaultCWD     string
-	AllowedRoots   []string
-	APIKey         string
-	TurnTimeout    time.Duration
-	SessionTTL     time.Duration
-	SessionStore   string
-	Logger         *slog.Logger
+	Engines      map[string]agentrun.Engine
+	ModelDetails map[string]ModelDetails
+	DefaultCWD   string
+	AllowedRoots []string
+	APIKey       string
+	TurnTimeout  time.Duration
+	SessionTTL   time.Duration
+	SessionStore string
+	Logger       *slog.Logger
 }
 
 type ModelDetails struct {
@@ -39,18 +38,14 @@ type ModelDetails struct {
 	MaxTokens     int
 }
 
-type DiscoveredModel struct {
-	ID           string
-	Engine       string
-	BackendModel string
-	Details      ModelDetails
-}
-
 type modelRoute struct {
-	engine       agentrun.Engine
-	engineID     string
-	backendModel string
-	details      ModelDetails
+	engine         agentrun.Engine
+	engineID       string
+	backendModel   string
+	effectiveIDs   []string
+	effortModels   map[string]string
+	selectedEffort string
+	details        ModelDetails
 }
 
 type Server struct {
@@ -139,57 +134,222 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	discovered := s.discoverModels(r.Context())
 	data := make([]map[string]any, 0, len(s.models)+len(discovered))
 	for _, model := range s.models {
-		data = append(data, modelObject(model, s.config.ModelDetails[model]))
+		var efforts []string
+		if model == "claude-code" {
+			efforts = []string{"low", "medium", "high"}
+		}
+		data = append(data, modelObject(model, s.config.ModelDetails[model], efforts))
 	}
 	for _, model := range discovered {
-		data = append(data, modelObject(model.ID, model.Details))
+		data = append(data, modelObject(model.id, model.details, model.efforts))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 }
 
-func modelObject(id string, details ModelDetails) map[string]any {
+func modelObject(id string, details ModelDetails, efforts []string) map[string]any {
 	name := details.Name
 	if name == "" {
 		name = id
 	}
-	return map[string]any{
+	result := map[string]any{
 		"id": id, "object": "model", "created": 0, "owned_by": "agentrun",
 		"name": name, "context_window": details.ContextWindow, "max_tokens": details.MaxTokens,
 	}
+	if len(efforts) > 0 {
+		result["reasoning_efforts"] = efforts
+		result["thinking_level_map"] = thinkingLevelMap(efforts)
+		if contains(efforts, "medium") {
+			result["default_reasoning_effort"] = "medium"
+		}
+	}
+	return result
 }
 
-func (s *Server) discoverModels(ctx context.Context) []DiscoveredModel {
-	if s.config.DiscoverModels == nil {
-		return nil
+func thinkingLevelMap(efforts []string) map[string]any {
+	available := make(map[string]bool, len(efforts))
+	for _, effort := range efforts {
+		available[effort] = true
 	}
-	models, err := s.config.DiscoverModels(ctx)
-	if err != nil {
-		s.config.Logger.Warn("discover backend models", "error", err)
-		s.routesMu.RLock()
-		defer s.routesMu.RUnlock()
-		cached := make([]DiscoveredModel, 0, len(s.routes))
-		for id, route := range s.routes {
-			cached = append(cached, DiscoveredModel{ID: id, Engine: route.engineID, BackendModel: route.backendModel, Details: route.details})
+	result := make(map[string]any, 6)
+	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
+		if available[level] {
+			result[level] = level
+		} else {
+			result[level] = nil
 		}
-		sort.Slice(cached, func(i, j int) bool { return cached[i].ID < cached[j].ID })
-		return cached
 	}
-	routes := make(map[string]modelRoute, len(models))
-	valid := models[:0]
-	for _, model := range models {
-		engine := s.config.Engines[model.Engine]
-		if engine == nil || model.ID == "" || model.BackendModel == "" {
+	if available["low"] {
+		result["minimal"] = "low"
+	} else {
+		result["minimal"] = nil
+	}
+	return result
+}
+
+type discoveredModel struct {
+	id      string
+	details ModelDetails
+	efforts []string
+}
+
+func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
+	for _, engineID := range s.models {
+		engine := s.config.Engines[engineID]
+		lister, ok := engine.(agentrun.ModelLister)
+		if !ok {
 			continue
 		}
-		routes[model.ID] = modelRoute{engine: engine, engineID: model.Engine, backendModel: model.BackendModel, details: model.Details}
-		valid = append(valid, model)
+		discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		models, err := lister.ListModels(discoveryCtx, agentrun.Session{CWD: s.config.DefaultCWD})
+		cancel()
+		if err != nil {
+			if !errors.Is(err, agentrun.ErrModelDiscoveryUnsupported) {
+				s.config.Logger.Warn("discover backend models", "engine", engineID, "error", err)
+			}
+			continue
+		}
+
+		base := s.config.ModelDetails[engineID]
+		fresh := make(map[string]modelRoute, len(models))
+		if engineID == "codex" {
+			fresh = groupedCodexRoutes(engineID, engine, base, models)
+		} else {
+			for _, model := range models {
+				modelID := strings.TrimSpace(model.ID)
+				if modelID == "" {
+					continue
+				}
+				if engineID == "claude-code" && modelID == "default" {
+					continue
+				}
+				id := engineID + "/" + modelID
+				name := strings.TrimSpace(model.Name)
+				if name == "" {
+					name = modelID
+				}
+				details := base
+				if base.Name != "" {
+					details.Name = base.Name + " · " + name
+				} else {
+					details.Name = name
+				}
+				effectiveIDs := append([]string{modelID}, model.Aliases...)
+				fresh[id] = modelRoute{engine: engine, engineID: engineID, backendModel: modelID, effectiveIDs: effectiveIDs, details: details}
+			}
+		}
+
+		s.routesMu.Lock()
+		for id, route := range s.routes {
+			if route.engineID == engineID {
+				delete(s.routes, id)
+			}
+		}
+		for id, route := range fresh {
+			s.routes[id] = route
+		}
+		s.routesMu.Unlock()
 	}
-	s.routesMu.Lock()
-	s.routes = routes
-	s.routesMu.Unlock()
-	sort.Slice(valid, func(i, j int) bool { return valid[i].ID < valid[j].ID })
-	return valid
+
+	s.routesMu.RLock()
+	discovered := make([]discoveredModel, 0, len(s.routes))
+	for id, route := range s.routes {
+		efforts := make([]string, 0, len(route.effortModels))
+		for effort := range route.effortModels {
+			efforts = append(efforts, effort)
+		}
+		if route.engineID == "claude-code" {
+			efforts = []string{"low", "medium", "high"}
+		} else {
+			sortEfforts(efforts)
+		}
+		discovered = append(discovered, discoveredModel{id: id, details: route.details, efforts: efforts})
+	}
+	s.routesMu.RUnlock()
+	sort.Slice(discovered, func(i, j int) bool { return discovered[i].id < discovered[j].id })
+	return discovered
+}
+
+func sortEfforts(efforts []string) {
+	order := map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4, "ultra": 5}
+	sort.Slice(efforts, func(i, j int) bool {
+		left, leftOK := order[efforts[i]]
+		right, rightOK := order[efforts[j]]
+		if leftOK && rightOK {
+			return left < right
+		}
+		if leftOK != rightOK {
+			return leftOK
+		}
+		return efforts[i] < efforts[j]
+	})
+}
+
+func groupedCodexRoutes(engineID string, engine agentrun.Engine, base ModelDetails, models []agentrun.ModelInfo) map[string]modelRoute {
+	routes := make(map[string]modelRoute)
+	for _, model := range models {
+		modelID := strings.TrimSpace(model.ID)
+		baseID, effort, ok := splitEffortModelID(modelID)
+		if !ok {
+			if modelID == "" {
+				continue
+			}
+			name := strings.TrimSpace(model.Name)
+			if name == "" {
+				name = modelID
+			}
+			details := base
+			if base.Name != "" {
+				details.Name = base.Name + " · " + name
+			} else {
+				details.Name = name
+			}
+			routes[engineID+"/"+modelID] = modelRoute{
+				engine: engine, engineID: engineID, backendModel: modelID,
+				effectiveIDs: append([]string{modelID}, model.Aliases...), details: details,
+			}
+			continue
+		}
+		id := engineID + "/" + baseID
+		route := routes[id]
+		if route.effortModels == nil {
+			name := strings.TrimSpace(model.Name)
+			name = strings.TrimSuffix(name, " ("+effort+")")
+			if name == "" {
+				name = baseID
+			}
+			details := base
+			if base.Name != "" {
+				details.Name = base.Name + " · " + name
+			} else {
+				details.Name = name
+			}
+			route = modelRoute{engine: engine, engineID: engineID, details: details, effortModels: make(map[string]string)}
+		}
+		route.effortModels[effort] = modelID
+		if route.backendModel == "" || effort == "medium" {
+			route.backendModel = modelID
+		}
+		routes[id] = route
+	}
+	return routes
+}
+
+func splitEffortModelID(id string) (string, string, bool) {
+	if !strings.HasSuffix(id, "]") {
+		return "", "", false
+	}
+	open := strings.LastIndexByte(id, '[')
+	if open <= 0 || open == len(id)-2 {
+		return "", "", false
+	}
+	effort := id[open+1 : len(id)-1]
+	switch effort {
+	case "low", "medium", "high", "xhigh", "max", "ultra":
+		return id[:open], effort, true
+	default:
+		return "", "", false
+	}
 }
 
 func (s *Server) resolveModel(id string) (modelRoute, bool) {
@@ -213,6 +373,41 @@ func (s *Server) resolveModel(id string) (modelRoute, bool) {
 	return modelRoute{engine: engine, engineID: engineID, backendModel: backendModel}, true
 }
 
+func selectReasoningEffort(route modelRoute, requested string) (modelRoute, error) {
+	requested = strings.TrimSpace(strings.ToLower(requested))
+	if requested == "minimal" {
+		requested = "low"
+	}
+	if len(route.effortModels) > 0 {
+		if requested == "" {
+			requested = "medium"
+			if _, ok := route.effortModels[requested]; !ok {
+				for _, fallback := range []string{"low", "high", "xhigh", "max", "ultra"} {
+					if _, ok := route.effortModels[fallback]; ok {
+						requested = fallback
+						break
+					}
+				}
+			}
+		}
+		backendModel, ok := route.effortModels[requested]
+		if !ok {
+			return modelRoute{}, fmt.Errorf("reasoning_effort %q is not available for this model", requested)
+		}
+		route.backendModel = backendModel
+		route.effectiveIDs = []string{backendModel}
+		route.selectedEffort = requested
+		return route, nil
+	}
+	if requested != "" && route.engineID == "claude-code" {
+		if requested != "low" && requested != "medium" && requested != "high" {
+			return modelRoute{}, fmt.Errorf("reasoning_effort %q is not available for Claude Code", requested)
+		}
+		route.selectedEffort = requested
+	}
+	return route, nil
+}
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 	decoder := json.NewDecoder(r.Body)
@@ -228,6 +423,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	route, ok := s.resolveModel(request.Model)
 	if !ok {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q was not found", request.Model), "invalid_request_error", "model_not_found")
+		return
+	}
+	if route.backendModel != "" && len(route.effectiveIDs) == 0 && len(route.effortModels) == 0 {
+		s.discoverModels(r.Context())
+		route, _ = s.resolveModel(request.Model)
+	}
+	route, err := selectReasoningEffort(route, request.ReasoningEffort)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "reasoning_effort_not_supported")
 		return
 	}
 	messages, err := normalizeMessages(request.Messages)
@@ -270,7 +474,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		cwd = resolved
 	}
 
-	state := s.registry.lock(sessionID + ":" + request.Model)
+	stateKey := sessionID + ":" + request.Model
+	if route.selectedEffort != "" {
+		stateKey += ":" + route.selectedEffort
+	}
+	state := s.registry.lock(stateKey)
 	defer state.mu.Unlock()
 	state.lastAccess = time.Now()
 
@@ -281,7 +489,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if reset {
 		delta = messages
 		stopProcess(state.process)
-		s.clearSession(state, sessionID, request.Model)
+		s.clearSession(state, stateKey)
 	} else {
 		delta = messages[state.persistedHistoryCount():]
 	}
@@ -299,6 +507,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
+		if route.engineID == "claude-code" && route.selectedEffort != "" {
+			options[agentrun.OptionEffort] = route.selectedEffort
+		}
 		if useResume {
 			options[agentrun.OptionResumeID] = state.resumeID
 		}
@@ -317,7 +528,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		startErr := start(resume, prompt)
 		if startErr != nil && resume && isMissingNativeSession(startErr) {
 			s.logError("native session unavailable; starting fresh", startErr, request.Model, sessionID)
-			s.clearSession(state, sessionID, request.Model)
+			s.clearSession(state, stateKey)
 			resume = false
 			delta = messages
 			prompt, err = turnPrompt(delta)
@@ -334,7 +545,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	completionID := randomID("chatcmpl-")
 	created := time.Now().Unix()
-	collector := newCollector(w, request.Stream, completionID, created, request.Model, resume)
+	collector := newCollector(w, request.Stream, completionID, created, request.Model, resume, route.effectiveIDs)
 	if request.Stream {
 		if err := collector.startStream(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error", "streaming_unsupported")
@@ -349,7 +560,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil && resume && isMissingNativeSession(err) && collector.text.Len() == 0 {
 		s.logError("native session unavailable during first turn; starting fresh", err, request.Model, sessionID)
 		stopProcess(state.process)
-		s.clearSession(state, sessionID, request.Model)
+		s.clearSession(state, stateKey)
 		resume = false
 		prompt, err = turnPrompt(messages)
 		if err == nil {
@@ -386,7 +597,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	state.lastAccess = time.Now()
 	if state.resumeID != "" {
-		err := s.registry.store.put(sessionID+":"+request.Model, persistedSession{
+		err := s.registry.store.put(stateKey, persistedSession{
 			ResumeID: state.resumeID, CWD: state.cwd, HistoryCount: state.historyCount, HistoryHash: state.historyHash,
 		})
 		if err != nil {
@@ -400,14 +611,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	collector.writeCompletion()
 }
 
-func (s *Server) clearSession(state *sessionState, sessionID, model string) {
+func (s *Server) clearSession(state *sessionState, stateKey string) {
 	state.process = nil
 	state.history = nil
 	state.historyCount = 0
 	state.historyHash = ""
 	state.resumeID = ""
-	if err := s.registry.store.delete(sessionID + ":" + model); err != nil {
-		s.logError("delete saved session", err, model, sessionID)
+	if err := s.registry.store.delete(stateKey); err != nil {
+		s.config.Logger.Warn("delete saved session", "error", err, "session_key", stateKey)
 	}
 }
 

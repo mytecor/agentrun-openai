@@ -21,10 +21,11 @@ type collector struct {
 	streamStarted  bool
 	resumeID       string
 	waitingForInit bool
+	effectiveIDs   []string
 }
 
-func newCollector(w http.ResponseWriter, stream bool, id string, created int64, model string, resumed bool) *collector {
-	return &collector{w: w, stream: stream, id: id, created: created, model: model, waitingForInit: resumed}
+func newCollector(w http.ResponseWriter, stream bool, id string, created int64, model string, resumed bool, effectiveIDs []string) *collector {
+	return &collector{w: w, stream: stream, id: id, created: created, model: model, waitingForInit: resumed, effectiveIDs: effectiveIDs}
 }
 
 func (c *collector) startStream() error {
@@ -42,6 +43,9 @@ func (c *collector) startStream() error {
 func (c *collector) handle(message agentrun.Message) error {
 	switch message.Type {
 	case agentrun.MessageInit:
+		if message.Init != nil && message.Init.Model != "" && len(c.effectiveIDs) > 0 && !contains(c.effectiveIDs, message.Init.Model) {
+			return fmt.Errorf("backend selected model %q; expected one of %q", message.Init.Model, c.effectiveIDs)
+		}
 		if message.ResumeID != "" {
 			c.resumeID = message.ResumeID
 		}
@@ -70,6 +74,15 @@ func (c *collector) handle(message agentrun.Message) error {
 		return fmt.Errorf("agent: %s", message.Content)
 	}
 	return nil
+}
+
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *collector) appendText(text string) {
