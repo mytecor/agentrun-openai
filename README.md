@@ -88,7 +88,7 @@ Install [`pi-models-discovery`](https://www.npmjs.com/package/pi-models-discover
 pi install npm:pi-models-discovery
 ```
 
-Then mark the provider for discovery in `~/.pi/agent/models.json`. The optional static entries below are only an offline fallback; online, Pi obtains every served model from `GET /v1/models`.
+Then mark the provider for discovery in `~/.pi/agent/models.json`. Pi obtains every served model from `GET /v1/models`, so no handwritten `models` array is needed.
 
 ```json
 {
@@ -104,11 +104,7 @@ Then mark the provider for discovery in `~/.pi/agent/models.json`. The optional 
       "compat": {
         "sendSessionAffinityHeaders": true,
         "sessionAffinityFormat": "openai"
-      },
-      "models": [
-        {"id": "claude-code", "name": "Claude Code", "input": ["text"], "contextWindow": 200000, "maxTokens": 32000},
-        {"id": "codex", "name": "Codex", "input": ["text"], "contextWindow": 200000, "maxTokens": 32000}
-      ]
+      }
     }
   }
 }
