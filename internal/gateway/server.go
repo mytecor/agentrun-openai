@@ -18,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/dmora/agentrun"
+	acpengine "github.com/dmora/agentrun/engine/acp"
 )
 
 type Config struct {
@@ -327,9 +328,7 @@ func groupedCodexRoutes(engineID string, engine agentrun.Engine, base ModelDetai
 			route = modelRoute{engine: engine, engineID: engineID, details: details, effortModels: make(map[string]string)}
 		}
 		route.effortModels[effort] = modelID
-		if route.backendModel == "" || effort == "medium" {
-			route.backendModel = modelID
-		}
+		route.backendModel = baseID
 		routes[id] = route
 	}
 	return routes
@@ -390,12 +389,11 @@ func selectReasoningEffort(route modelRoute, requested string) (modelRoute, erro
 				}
 			}
 		}
-		backendModel, ok := route.effortModels[requested]
+		effectiveModel, ok := route.effortModels[requested]
 		if !ok {
 			return modelRoute{}, fmt.Errorf("reasoning_effort %q is not available for this model", requested)
 		}
-		route.backendModel = backendModel
-		route.effectiveIDs = []string{backendModel}
+		route.effectiveIDs = []string{route.backendModel, effectiveModel}
 		route.selectedEffort = requested
 		return route, nil
 	}
@@ -507,8 +505,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
-		if route.engineID == "claude-code" && route.selectedEffort != "" {
-			options[agentrun.OptionEffort] = route.selectedEffort
+		if route.selectedEffort != "" {
+			if route.engineID == "codex" {
+				options[acpengine.SessionConfigOption("reasoning_effort")] = route.selectedEffort
+			} else if route.engineID == "claude-code" {
+				options[agentrun.OptionEffort] = route.selectedEffort
+			}
 		}
 		if useResume {
 			options[agentrun.OptionResumeID] = state.resumeID

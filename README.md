@@ -14,7 +14,7 @@ Built-in models:
 - `codex/<model-id>` uses agentrun's persistent ACP backend and a `codex-acp` executable.
 - `claude-code/<model-id>` uses agentrun's persistent Claude Code backend with an explicitly selected model.
 
-Concrete Codex and Claude models are discovered through agentrun's public model-catalog API whenever `/models` is requested. Codex effort variants are grouped into one public entry per base model: select the reasoning level separately with the OpenAI-compatible `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, or `max`). The gateway uses `medium` by default and routes the request to the exact ACP model ID such as `gpt-5.6-sol[high]`. The `codex` and `claude-code` IDs still delegate model choice to each backend's default and remain available alongside the discovered models. If discovery temporarily fails, the gateway retains the last known catalog; if no catalog has been obtained yet, the backend-default entry remains usable.
+Concrete Codex and Claude models are discovered through agentrun's public model-catalog API whenever `/models` is requested. Codex effort variants are grouped into one public entry per base model: select the reasoning level separately with the OpenAI-compatible `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, or `max`). The gateway uses `medium` by default and sends the base model and ACP `reasoning_effort` config option separately. The `codex` and `claude-code` IDs still delegate model choice to each backend's default and remain available alongside the discovered models. If discovery temporarily fails, the gateway retains the last known catalog; if no catalog has been obtained yet, the backend-default entry remains usable.
 
 ## Install
 

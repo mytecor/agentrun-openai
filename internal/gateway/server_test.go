@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/dmora/agentrun"
+	acpengine "github.com/dmora/agentrun/engine/acp"
 )
 
 type fakeEngine struct {
@@ -444,8 +445,9 @@ func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test[medium]" {
-		t.Fatalf("sessions = %#v, want backend model gpt-test[medium]", engine.sessions)
+	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test" ||
+		engine.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")] != "medium" {
+		t.Fatalf("sessions = %#v, want backend model gpt-test with medium effort", engine.sessions)
 	}
 }
 
@@ -469,7 +471,9 @@ func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	if len(engine.sessions) != 2 || engine.sessions[0].Model != "gpt-test[high]" || engine.sessions[1].Model != "gpt-test[medium]" {
+	if len(engine.sessions) != 2 || engine.sessions[0].Model != "gpt-test" || engine.sessions[1].Model != "gpt-test" ||
+		engine.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")] != "high" ||
+		engine.sessions[1].Options[acpengine.SessionConfigOption("reasoning_effort")] != "medium" {
 		t.Fatalf("sessions = %#v", engine.sessions)
 	}
 }
