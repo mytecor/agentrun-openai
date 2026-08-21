@@ -20,34 +20,44 @@ import (
 )
 
 type fakeEngine struct {
-	mu       sync.Mutex
-	sessions []agentrun.Session
-	procs    []*fakeProcess
+	mu              sync.Mutex
+	sessions        []agentrun.Session
+	procs           []*fakeProcess
+	failResumeStart bool
+	failResumeTurn  bool
 }
 
 func (e *fakeEngine) Validate() error { return nil }
 
 func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...agentrun.Option) (agentrun.Process, error) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	resumeID := session.Options[agentrun.OptionResumeID]
+	e.sessions = append(e.sessions, session)
+	if resumeID != "" && e.failResumeStart {
+		e.failResumeStart = false
+		return nil, fmt.Errorf("%w: expired", agentrun.ErrSessionNotFound)
+	}
 	resumed := resumeID != ""
 	if resumeID == "" {
 		resumeID = fmt.Sprintf("resume-%d", len(e.procs)+1)
 	}
-	p := &fakeProcess{output: make(chan agentrun.Message, 16), resumeID: resumeID, replayOnStart: resumed}
-	e.sessions = append(e.sessions, session)
+	p := &fakeProcess{
+		output: make(chan agentrun.Message, 16), resumeID: resumeID, replayOnStart: resumed,
+		missingOnStart: resumed && e.failResumeTurn,
+	}
 	e.procs = append(e.procs, p)
-	e.mu.Unlock()
 	return p, nil
 }
 
 type fakeProcess struct {
-	mu            sync.Mutex
-	output        chan agentrun.Message
-	prompts       []string
-	stopped       bool
-	resumeID      string
-	replayOnStart bool
+	mu             sync.Mutex
+	output         chan agentrun.Message
+	prompts        []string
+	stopped        bool
+	resumeID       string
+	replayOnStart  bool
+	missingOnStart bool
 }
 
 func (p *fakeProcess) Output() <-chan agentrun.Message { return p.output }
@@ -56,6 +66,11 @@ func (p *fakeProcess) Send(_ context.Context, prompt string) error {
 	p.mu.Lock()
 	p.prompts = append(p.prompts, prompt)
 	p.mu.Unlock()
+	if p.missingOnStart {
+		p.missingOnStart = false
+		p.output <- agentrun.Message{Type: agentrun.MessageError, Content: "No conversation found with that session ID"}
+		return nil
+	}
 	if p.replayOnStart {
 		p.output <- agentrun.Message{Type: agentrun.MessageText, Content: "replayed old answer"}
 		p.replayOnStart = false
@@ -189,6 +204,67 @@ func TestSessionStoreResumesAfterServerRestartWithoutTranscriptText(t *testing.T
 	}
 }
 
+func TestMissingNativeSessionFallsBackToFreshConversation(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	firstServer := newTestServerWithStore(&fakeEngine{}, storePath)
+	first := doChat(t, firstServer, `{"model":"test-agent","messages":[{"role":"user","content":"first"}]}`, map[string]string{"X-Session-Affinity": "expired"})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, body = %s", first.Code, first.Body.String())
+	}
+	firstServer.Close()
+
+	engine := &fakeEngine{failResumeStart: true}
+	server := newTestServerWithStore(engine, storePath)
+	defer server.Close()
+	second := doChat(t, server, continuationPayload(t, "first", "answer: first", "second"), map[string]string{"X-Session-Affinity": "expired"})
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d, body = %s", second.Code, second.Body.String())
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.sessions) != 2 {
+		t.Fatalf("start attempts = %d, want 2", len(engine.sessions))
+	}
+	if got := engine.sessions[0].Options[agentrun.OptionResumeID]; got != "resume-1" {
+		t.Fatalf("first attempt resume id = %q, want resume-1", got)
+	}
+	if got := engine.sessions[1].Options[agentrun.OptionResumeID]; got != "" {
+		t.Fatalf("fallback resume id = %q, want empty", got)
+	}
+	if prompt := engine.sessions[1].Prompt; !strings.Contains(prompt, "first") || !strings.Contains(prompt, "second") {
+		t.Fatalf("fallback prompt does not contain the full conversation: %q", prompt)
+	}
+}
+
+func TestMissingNativeSessionReportedByTurnFallsBackToFreshConversation(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "sessions.json")
+	firstServer := newTestServerWithStore(&fakeEngine{}, storePath)
+	first := doChat(t, firstServer, `{"model":"test-agent","messages":[{"role":"user","content":"first"}]}`, map[string]string{"X-Session-Affinity": "expired-turn"})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first status = %d, body = %s", first.Code, first.Body.String())
+	}
+	firstServer.Close()
+
+	engine := &fakeEngine{failResumeTurn: true}
+	server := newTestServerWithStore(engine, storePath)
+	defer server.Close()
+	second := doChat(t, server, continuationPayload(t, "first", "answer: first", "second"), map[string]string{"X-Session-Affinity": "expired-turn"})
+	if second.Code != http.StatusOK {
+		t.Fatalf("second status = %d, body = %s", second.Code, second.Body.String())
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.sessions) != 2 {
+		t.Fatalf("start attempts = %d, want 2", len(engine.sessions))
+	}
+	if got := engine.sessions[1].Options[agentrun.OptionResumeID]; got != "" {
+		t.Fatalf("fallback resume id = %q, want empty", got)
+	}
+	if prompt := engine.sessions[1].Prompt; !strings.Contains(prompt, "first") || !strings.Contains(prompt, "second") {
+		t.Fatalf("fallback prompt does not contain the full conversation: %q", prompt)
+	}
+}
+
 func TestLinearConversationReusesProcessAndSendsOnlyNewTurn(t *testing.T) {
 	engine := &fakeEngine{}
 	server := newTestServer(engine)
@@ -297,11 +373,56 @@ func TestValidationAndAuthentication(t *testing.T) {
 
 func TestModelsAreOpenAIShaped(t *testing.T) {
 	server := newTestServer(&fakeEngine{})
+	server.config.ModelDetails = map[string]ModelDetails{
+		"test-agent": {Name: "Test Agent", ContextWindow: 1234, MaxTokens: 567},
+	}
 	defer server.Close()
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", bytes.NewReader(nil))
-	recorder := httptest.NewRecorder()
-	server.ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"object":"list"`) {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	for _, path := range []string{"/v1/models", "/models"} {
+		req := httptest.NewRequest(http.MethodGet, path, bytes.NewReader(nil))
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, req)
+		body := recorder.Body.String()
+		if recorder.Code != http.StatusOK || !strings.Contains(body, `"object":"list"`) ||
+			!strings.Contains(body, `"name":"Test Agent"`) || !strings.Contains(body, `"context_window":1234`) ||
+			!strings.Contains(body, `"max_tokens":567`) {
+			t.Fatalf("path = %s, status = %d, body = %s", path, recorder.Code, body)
+		}
+	}
+}
+
+func TestAllowedRootsPermitChildrenAndRejectOutside(t *testing.T) {
+	allowed := t.TempDir()
+	child := filepath.Join(allowed, "project")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(&fakeEngine{})
+	server.config.AllowedRoots = []string{allowed}
+	defer server.Close()
+
+	inside := doChat(t, server, `{"model":"test-agent","messages":[{"role":"user","content":"inside"}]}`, map[string]string{"X-Agent-CWD": child})
+	if inside.Code != http.StatusOK {
+		t.Fatalf("inside status = %d, body = %s", inside.Code, inside.Body.String())
+	}
+	outside := doChat(t, server, `{"model":"test-agent","messages":[{"role":"user","content":"outside"}]}`, map[string]string{"X-Agent-CWD": t.TempDir()})
+	if outside.Code != http.StatusForbidden || !strings.Contains(outside.Body.String(), `"code":"cwd_not_allowed"`) {
+		t.Fatalf("outside status = %d, body = %s", outside.Code, outside.Body.String())
+	}
+}
+
+func TestAllowedRootsRejectSymlinkEscape(t *testing.T) {
+	allowed := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(allowed, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	server := newTestServer(&fakeEngine{})
+	server.config.AllowedRoots = []string{allowed}
+	defer server.Close()
+
+	response := doChat(t, server, `{"model":"test-agent","messages":[{"role":"user","content":"escape"}]}`, map[string]string{"X-Agent-CWD": link})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }

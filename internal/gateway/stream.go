@@ -79,6 +79,14 @@ func (c *collector) appendText(text string) {
 	}
 }
 
+func (c *collector) resetForFreshSession() {
+	c.text.Reset()
+	c.usage = completionUsage{}
+	c.sawDelta = false
+	c.resumeID = ""
+	c.waitingForInit = false
+}
+
 func (c *collector) writeCompletion() {
 	c.w.Header().Set("Content-Type", "application/json")
 	response := map[string]any{

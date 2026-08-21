@@ -5,7 +5,7 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 ## Endpoints
 
 - `GET /healthz`
-- `GET /v1/models`
+- `GET /v1/models` (also available as `GET /models`)
 - `POST /v1/chat/completions` with `stream: false` or `stream: true`
 
 Built-in models:
@@ -59,6 +59,7 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --port 8787
 --api-key local-secret
 --default-cwd /absolute/path/to/project
+--allowed-root /absolute/path/to/projects
 --claude-binary claude
 --codex-acp-binary codex-acp
 --codex-acp-args arg1,arg2
@@ -66,6 +67,8 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --session-ttl 10m
 --session-store "/path/to/sessions.json"
 ```
+
+`--allowed-root` is optional and repeatable. When at least one root is configured, `X-Agent-CWD` must resolve inside one of those directories; symlink escapes are rejected. With no allowed roots, any absolute working directory is accepted. The equivalent environment variable is `AGENTRUN_ALLOWED_ROOTS`, using the operating system's path-list separator.
 
 Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity is resolved in this order:
 
@@ -79,6 +82,14 @@ If none is present, the gateway creates a one-off ID and returns it as `X-Sessio
 
 ## Pi configuration
 
+Install [`pi-models-discovery`](https://www.npmjs.com/package/pi-models-discovery) once:
+
+```sh
+pi install npm:pi-models-discovery
+```
+
+Then mark the provider for discovery in `~/.pi/agent/models.json`. The optional static entries below are only an offline fallback; online, Pi obtains every served model from `GET /v1/models`.
+
 ```json
 {
   "providers": {
@@ -86,6 +97,7 @@ If none is present, the gateway creates a one-off ID and returns it as `X-Sessio
       "baseUrl": "http://127.0.0.1:8787/v1",
       "api": "openai-completions",
       "apiKey": "local",
+      "discoverModels": true,
       "headers": {
         "X-Agent-CWD": "!pwd"
       },
@@ -102,7 +114,9 @@ If none is present, the gateway creates a one-off ID and returns it as `X-Sessio
 }
 ```
 
-The gateway keeps an idle Claude/Codex process for 10 minutes by default. It captures the backend's native resume ID and persists it with the working directory, message count, and a SHA-256 transcript fingerprint. Message text is not written to this store. After idle eviction or a server restart, a matching Pi history resumes the native backend session and sends only the newly appended turn. If the history diverges or the working directory changes, the saved resume ID is discarded and a fresh agent is started with the supplied branch as context.
+To make every discovered agent model selectable, add `"agentrun/*"` to `enabledModels` in `~/.pi/agent/settings.json`. Run `/config:model-discovery-refresh` inside Pi after changing the server's model list.
+
+The gateway keeps an idle Claude/Codex process for 10 minutes by default. It captures the backend's native resume ID and persists it with the working directory, message count, and a SHA-256 transcript fingerprint. Message text is not written to this store. After idle eviction or a server restart, a matching Pi history resumes the native backend session and sends only the newly appended turn. If the native session has expired or been deleted, the gateway automatically retries once with the complete supplied conversation. If the history diverges or the working directory changes, the saved resume ID is discarded and a fresh agent is started with the supplied branch as context.
 
 Internal agent tool calls are deliberately not exposed as OpenAI `tool_calls`; only assistant text crosses the HTTP boundary.
 

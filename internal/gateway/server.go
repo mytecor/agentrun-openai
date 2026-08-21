@@ -22,12 +22,20 @@ import (
 
 type Config struct {
 	Engines      map[string]agentrun.Engine
+	ModelDetails map[string]ModelDetails
 	DefaultCWD   string
+	AllowedRoots []string
 	APIKey       string
 	TurnTimeout  time.Duration
 	SessionTTL   time.Duration
 	SessionStore string
 	Logger       *slog.Logger
+}
+
+type ModelDetails struct {
+	Name          string
+	ContextWindow int
+	MaxTokens     int
 }
 
 type Server struct {
@@ -94,7 +102,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+	case r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models"):
 		s.handleModels(w)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
 		s.handleChat(w, r)
@@ -113,7 +121,15 @@ func (s *Server) authorized(r *http.Request) bool {
 func (s *Server) handleModels(w http.ResponseWriter) {
 	data := make([]map[string]any, 0, len(s.models))
 	for _, model := range s.models {
-		data = append(data, map[string]any{"id": model, "object": "model", "created": 0, "owned_by": "agentrun"})
+		details := s.config.ModelDetails[model]
+		name := details.Name
+		if name == "" {
+			name = model
+		}
+		data = append(data, map[string]any{
+			"id": model, "object": "model", "created": 0, "owned_by": "agentrun",
+			"name": name, "context_window": details.ContextWindow, "max_tokens": details.MaxTokens,
+		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
@@ -163,6 +179,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "X-Agent-CWD must be an absolute path", "invalid_request_error", "invalid_cwd")
 		return
 	}
+	if len(s.config.AllowedRoots) > 0 {
+		resolved, allowed, resolveErr := resolveAllowedCWD(cwd, s.config.AllowedRoots)
+		if resolveErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid X-Agent-CWD: "+resolveErr.Error(), "invalid_request_error", "invalid_cwd")
+			return
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, "X-Agent-CWD is outside the configured allowed roots", "invalid_request_error", "cwd_not_allowed")
+			return
+		}
+		cwd = resolved
+	}
 
 	state := s.registry.lock(sessionID + ":" + request.Model)
 	defer state.mu.Unlock()
@@ -175,14 +203,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if reset {
 		delta = messages
 		stopProcess(state.process)
-		state.process = nil
-		state.history = nil
-		state.historyCount = 0
-		state.historyHash = ""
-		state.resumeID = ""
-		if err := s.registry.store.delete(sessionID + ":" + request.Model); err != nil {
-			s.logError("delete saved session", err, request.Model, sessionID)
-		}
+		s.clearSession(state, sessionID, request.Model)
 	} else {
 		delta = messages[state.persistedHistoryCount():]
 	}
@@ -195,25 +216,42 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.config.TurnTimeout)
 	defer cancel()
 	first := state.process == nil
-	if first {
+	start := func(useResume bool, turnPrompt string) error {
 		// This HTTP API cannot relay interactive permission prompts. HITL off
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
-		if resume {
+		if useResume {
 			options[agentrun.OptionResumeID] = state.resumeID
 		}
 		if system := systemPrompt(messages); system != "" {
 			options[agentrun.OptionSystemPrompt] = system
 		}
-		process, startErr := engine.Start(ctx, agentrun.Session{CWD: cwd, Prompt: prompt, Options: options})
+		process, startErr := engine.Start(ctx, agentrun.Session{CWD: cwd, Prompt: turnPrompt, Options: options})
+		if startErr != nil {
+			return startErr
+		}
+		state.process = process
+		state.cwd = cwd
+		return nil
+	}
+	if first {
+		startErr := start(resume, prompt)
+		if startErr != nil && resume && isMissingNativeSession(startErr) {
+			s.logError("native session unavailable; starting fresh", startErr, request.Model, sessionID)
+			s.clearSession(state, sessionID, request.Model)
+			resume = false
+			delta = messages
+			prompt, err = turnPrompt(delta)
+			if err == nil {
+				startErr = start(false, prompt)
+			}
+		}
 		if startErr != nil {
 			s.logError("start agent", startErr, request.Model, sessionID)
 			writeError(w, http.StatusBadGateway, startErr.Error(), "server_error", "agent_start_failed")
 			return
 		}
-		state.process = process
-		state.cwd = cwd
 	}
 
 	completionID := randomID("chatcmpl-")
@@ -230,6 +268,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		run = agentrun.RunFirstTurn
 	}
 	err = run(ctx, state.process, prompt, collector.handle)
+	if err != nil && resume && isMissingNativeSession(err) && collector.text.Len() == 0 {
+		s.logError("native session unavailable during first turn; starting fresh", err, request.Model, sessionID)
+		stopProcess(state.process)
+		s.clearSession(state, sessionID, request.Model)
+		resume = false
+		prompt, err = turnPrompt(messages)
+		if err == nil {
+			err = start(false, prompt)
+		}
+		if err == nil {
+			collector.resetForFreshSession()
+			err = agentrun.RunFirstTurn(ctx, state.process, prompt, collector.handle)
+		}
+	}
 	if err != nil {
 		s.logError("agent turn", err, request.Model, sessionID)
 		stopProcess(state.process)
@@ -268,6 +320,48 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	collector.writeCompletion()
+}
+
+func (s *Server) clearSession(state *sessionState, sessionID, model string) {
+	state.process = nil
+	state.history = nil
+	state.historyCount = 0
+	state.historyHash = ""
+	state.resumeID = ""
+	if err := s.registry.store.delete(sessionID + ":" + model); err != nil {
+		s.logError("delete saved session", err, model, sessionID)
+	}
+}
+
+func resolveAllowedCWD(cwd string, roots []string) (string, bool, error) {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", false, err
+	}
+	for _, root := range roots {
+		resolvedRoot, rootErr := filepath.EvalSymlinks(root)
+		if rootErr != nil {
+			return "", false, fmt.Errorf("resolve allowed root %s: %w", root, rootErr)
+		}
+		rel, relErr := filepath.Rel(resolvedRoot, resolved)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return resolved, true, nil
+		}
+	}
+	return resolved, false, nil
+}
+
+func isMissingNativeSession(err error) bool {
+	if errors.Is(err, agentrun.ErrSessionNotFound) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"no conversation found", "session not found", "could not find session", "unknown session"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func affinityID(r *http.Request, bodyValue string) string {
