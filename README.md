@@ -1,4 +1,4 @@
-# agentrun-openapi
+# agentrun-openai
 
 An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://github.com/dmora/agentrun). It exposes complete coding agents as models while keeping their tools, subprocesses, and subagents inside the agent runtime.
 
@@ -24,8 +24,8 @@ Requirements: Go 1.24+, an authenticated `claude` CLI, and/or a globally install
 From the repository root, install the executable into a directory already present on `PATH`:
 
 ```sh
-GOBIN="$HOME/.local/bin" go install ./cmd/agentrun-openapi
-agentrun-openapi --help
+GOBIN="$HOME/.local/bin" go install ./cmd/agentrun-openai
+agentrun-openai --help
 ```
 
 Create `$HOME/.local/bin` and add it to `PATH` first if your shell does not already use it.
@@ -35,9 +35,9 @@ Create `$HOME/.local/bin` and add it to `PATH` first if your shell does not alre
 Build a release binary and install it into `/usr/local/bin`:
 
 ```sh
-go build -trimpath -o agentrun-openapi ./cmd/agentrun-openapi
-sudo install -m 0755 agentrun-openapi /usr/local/bin/agentrun-openapi
-agentrun-openapi --help
+go build -trimpath -o agentrun-openai ./cmd/agentrun-openai
+sudo install -m 0755 agentrun-openai /usr/local/bin/agentrun-openai
+agentrun-openai --help
 ```
 
 To update an existing installation, pull the new project version and repeat the same build and `install` commands. The server runs as the current user, so `claude` and `codex-acp` must be available on that user's `PATH` and authenticated for that user.
@@ -45,13 +45,13 @@ To update an existing installation, pull the new project version and repeat the 
 ## Run
 
 ```sh
-agentrun-openapi
+agentrun-openai
 ```
 
 To select another port or listen interface:
 
 ```sh
-agentrun-openapi --host 127.0.0.1 --port 9000
+agentrun-openai --host 127.0.0.1 --port 9000
 ```
 
 The server listens on `127.0.0.1:8787` by default. Useful options:

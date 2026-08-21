@@ -21,8 +21,8 @@ import (
 	"github.com/dmora/agentrun/engine/cli"
 	"github.com/dmora/agentrun/engine/cli/claude"
 
-	"github.com/mytecor/agentrun-openapi/internal/discovery"
-	"github.com/mytecor/agentrun-openapi/internal/gateway"
+	"github.com/mytecor/agentrun-openai/internal/discovery"
+	"github.com/mytecor/agentrun-openai/internal/gateway"
 )
 
 func main() {
@@ -176,7 +176,7 @@ func defaultSessionStore() string {
 	if err != nil || dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, "agentrun-openapi", "sessions.json")
+	return filepath.Join(dir, "agentrun-openai", "sessions.json")
 }
 
 func env(key, fallback string) string {

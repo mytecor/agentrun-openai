@@ -1,4 +1,4 @@
-module github.com/mytecor/agentrun-openapi
+module github.com/mytecor/agentrun-openai
 
 go 1.24
 

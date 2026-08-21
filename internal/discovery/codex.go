@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/mytecor/agentrun-openapi/internal/gateway"
+	"github.com/mytecor/agentrun-openai/internal/gateway"
 )
 
 const (
@@ -91,7 +91,7 @@ func codexModelsCommand(cmd *exec.Cmd) ([]gateway.DiscoveredModel, error) {
 	if err := encoder.Encode(map[string]any{
 		"id": 1, "method": "initialize",
 		"params": map[string]any{
-			"clientInfo":   map[string]string{"name": "agentrun-openapi", "version": "1"},
+			"clientInfo":   map[string]string{"name": "agentrun-openai", "version": "1"},
 			"capabilities": map[string]bool{"experimentalApi": true},
 		},
 	}); err != nil {
