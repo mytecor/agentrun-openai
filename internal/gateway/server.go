@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,12 @@ import (
 	"github.com/dmora/agentrun"
 	acpengine "github.com/dmora/agentrun/engine/acp"
 )
+
+// defaultStreamHeartbeat keeps streams alive through long tool-only stretches.
+// Coding agents run their tools inside the backend, so a turn can produce no
+// visible output for minutes; clients with stall detectors abort well before
+// the turn timeout.
+const defaultStreamHeartbeat = 20 * time.Second
 
 type Config struct {
 	Engines      map[string]agentrun.Engine
@@ -30,7 +37,14 @@ type Config struct {
 	TurnTimeout  time.Duration
 	SessionTTL   time.Duration
 	SessionStore string
-	Logger       *slog.Logger
+	// StreamHeartbeat is how long a stream may stay silent before an empty
+	// delta is emitted. Zero selects the default; negative disables it.
+	StreamHeartbeat time.Duration
+	// ClaudeThinkingBudget caps Claude Code's extended-thinking tokens. Claude
+	// emits no thinking blocks unless this is set, so reasoning_content stays
+	// empty at zero.
+	ClaudeThinkingBudget int
+	Logger               *slog.Logger
 }
 
 type ModelDetails struct {
@@ -62,6 +76,12 @@ type Server struct {
 func New(config Config) *Server {
 	if config.TurnTimeout <= 0 {
 		config.TurnTimeout = 30 * time.Minute
+	}
+	if config.StreamHeartbeat == 0 {
+		config.StreamHeartbeat = defaultStreamHeartbeat
+	}
+	if config.StreamHeartbeat < 0 {
+		config.StreamHeartbeat = 0
 	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
@@ -505,6 +525,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
+		if route.engineID == "claude-code" && s.config.ClaudeThinkingBudget > 0 {
+			options[agentrun.OptionThinkingBudget] = strconv.Itoa(s.config.ClaudeThinkingBudget)
+		}
 		if route.selectedEffort != "" {
 			if route.engineID == "codex" {
 				options[acpengine.SessionConfigOption("reasoning_effort")] = route.selectedEffort
@@ -553,6 +576,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error", "streaming_unsupported")
 			return
 		}
+		defer collector.startHeartbeat(s.config.StreamHeartbeat)()
 	}
 	run := agentrun.RunTurn
 	if first {

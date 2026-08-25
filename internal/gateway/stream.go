@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/dmora/agentrun"
 )
@@ -16,12 +18,21 @@ type collector struct {
 	created        int64
 	model          string
 	text           strings.Builder
+	reasoning      strings.Builder
 	usage          completionUsage
 	sawDelta       bool
+	sawThinking    bool
 	streamStarted  bool
 	resumeID       string
 	waitingForInit bool
 	effectiveIDs   []string
+
+	// mu guards every write to w. The heartbeat writes from its own goroutine
+	// while the turn is still streaming, and http.ResponseWriter is not safe
+	// for concurrent use.
+	mu        sync.Mutex
+	closed    bool
+	lastWrite time.Time
 }
 
 func newCollector(w http.ResponseWriter, stream bool, id string, created int64, model string, resumed bool, effectiveIDs []string) *collector {
@@ -64,6 +75,20 @@ func (c *collector) handle(message agentrun.Message) error {
 			c.appendText(message.Content)
 		}
 		c.sawDelta = false
+	case agentrun.MessageThinkingDelta:
+		if c.waitingForInit {
+			return nil
+		}
+		c.sawThinking = true
+		c.appendReasoning(message.Content)
+	case agentrun.MessageThinking:
+		if c.waitingForInit {
+			return nil
+		}
+		if !c.sawThinking {
+			c.appendReasoning(message.Content)
+		}
+		c.sawThinking = false
 	case agentrun.MessageResult:
 		if message.Usage != nil {
 			c.usage.PromptTokens = message.Usage.InputTokens
@@ -92,21 +117,85 @@ func (c *collector) appendText(text string) {
 	}
 }
 
+// appendReasoning streams thinking output as reasoning_content. It is kept out
+// of c.text so the conversation transcript stores only the assistant's answer.
+func (c *collector) appendReasoning(text string) {
+	if text == "" {
+		return
+	}
+	c.reasoning.WriteString(text)
+	if c.stream {
+		c.writeChunk(map[string]string{"reasoning_content": text}, nil, nil)
+	}
+}
+
+// startHeartbeat emits an empty delta whenever the stream has been silent for
+// interval. A coding agent runs its own tools between text blocks, so a turn
+// can legitimately produce no output for minutes; without a heartbeat, client
+// stall detectors abort the request mid-turn. The returned function stops the
+// heartbeat and waits for its goroutine to exit.
+func (c *collector) startHeartbeat(interval time.Duration) func() {
+	if !c.stream || interval <= 0 {
+		return func() {}
+	}
+	// Tick faster than the interval: a tick that lands just after real output
+	// is skipped, so ticking at exactly interval would allow silences of up to
+	// twice it.
+	tick := interval / 2
+	if tick < time.Millisecond {
+		tick = time.Millisecond
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(tick)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				c.beat(interval)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}
+}
+
+func (c *collector) beat(interval time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || time.Since(c.lastWrite) < interval {
+		return
+	}
+	c.writeChunkLocked(map[string]string{}, nil, nil)
+}
+
 func (c *collector) resetForFreshSession() {
 	c.text.Reset()
+	c.reasoning.Reset()
 	c.usage = completionUsage{}
 	c.sawDelta = false
+	c.sawThinking = false
 	c.resumeID = ""
 	c.waitingForInit = false
 }
 
 func (c *collector) writeCompletion() {
 	c.w.Header().Set("Content-Type", "application/json")
+	message := map[string]string{"role": "assistant", "content": c.text.String()}
+	if c.reasoning.Len() > 0 {
+		message["reasoning_content"] = c.reasoning.String()
+	}
 	response := map[string]any{
 		"id": c.id, "object": "chat.completion", "created": c.created, "model": c.model,
 		"choices": []any{map[string]any{
 			"index":         0,
-			"message":       map[string]string{"role": "assistant", "content": c.text.String()},
+			"message":       message,
 			"finish_reason": "stop",
 		}},
 		"usage": c.usage,
@@ -115,24 +204,42 @@ func (c *collector) writeCompletion() {
 }
 
 func (c *collector) finishStream() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
 	reason := "stop"
-	c.writeChunk(map[string]string{}, &reason, &c.usage)
+	c.writeChunkLocked(map[string]string{}, &reason, &c.usage)
 	fmt.Fprint(c.w, "data: [DONE]\n\n")
-	c.flush()
+	c.flushLocked()
+	c.closed = true
 }
 
 func (c *collector) streamError(err error) {
-	if !c.streamStarted {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.streamStarted || c.closed {
 		return
 	}
 	payload := apiErrorEnvelope{Error: apiError{Message: err.Error(), Type: "server_error", Code: "agent_turn_failed"}}
 	data, _ := json.Marshal(payload)
 	fmt.Fprintf(c.w, "data: %s\n\n", data)
 	fmt.Fprint(c.w, "data: [DONE]\n\n")
-	c.flush()
+	c.flushLocked()
+	c.closed = true
 }
 
 func (c *collector) writeChunk(delta map[string]string, finishReason *string, usage *completionUsage) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeChunkLocked(delta, finishReason, usage)
+}
+
+func (c *collector) writeChunkLocked(delta map[string]string, finishReason *string, usage *completionUsage) {
+	if c.closed {
+		return
+	}
 	choice := map[string]any{"index": 0, "delta": delta, "finish_reason": finishReason}
 	payload := map[string]any{
 		"id": c.id, "object": "chat.completion.chunk", "created": c.created, "model": c.model,
@@ -143,10 +250,11 @@ func (c *collector) writeChunk(delta map[string]string, finishReason *string, us
 	}
 	data, _ := json.Marshal(payload)
 	fmt.Fprintf(c.w, "data: %s\n\n", data)
-	c.flush()
+	c.flushLocked()
+	c.lastWrite = time.Now()
 }
 
-func (c *collector) flush() {
+func (c *collector) flushLocked() {
 	if flusher, ok := c.w.(http.Flusher); ok {
 		flusher.Flush()
 	}

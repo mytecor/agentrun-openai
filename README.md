@@ -69,6 +69,8 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --turn-timeout 30m
 --session-ttl 10m
 --session-store "/path/to/sessions.json"
+--stream-heartbeat 20s
+--claude-thinking-budget 0
 ```
 
 `--allowed-root` is optional and repeatable. When at least one root is configured, `X-Agent-CWD` must resolve inside one of those directories; symlink escapes are rejected. With no allowed roots, any absolute working directory is accepted. The equivalent environment variable is `AGENTRUN_ALLOWED_ROOTS`, using the operating system's path-list separator.
@@ -82,6 +84,15 @@ Every request may set `X-Agent-CWD` to an absolute project directory. Session af
 5. JSON `session_id`
 
 If none is present, the gateway creates a one-off ID and returns it as `X-Session-ID`.
+
+## Streaming and long tool runs
+
+Coding agents execute their own tools inside the backend, so a single turn can spend minutes reading files or running searches without emitting any text. The gateway keeps such a turn visible in two ways:
+
+- Thinking output is streamed as `reasoning_content` deltas, separate from `content`. Reasoning is never written into the stored conversation transcript, so it cannot leak into a later turn's context. Codex reports thinking over ACP as `agent_thought_chunk`. Claude Code emits nothing unless `--claude-thinking-budget` is set above zero, and even then it may return empty thinking blocks depending on the account and model — in that case only the heartbeat keeps the stream alive.
+- When a stream has been silent for `--stream-heartbeat` (20s by default), an empty delta is sent. Clients that abort a stalled stream — Pi's stall watchdog fires after 90s — see a live connection instead of a dead one. Set a negative duration to disable the heartbeat, or use `AGENTRUN_STREAM_HEARTBEAT`.
+
+Tool calls are not streamed as OpenAI `tool_calls`. The backend has already executed them, and an OpenAI client that received them would try to execute them again.
 
 ## Pi configuration
 

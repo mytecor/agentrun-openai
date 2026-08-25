@@ -44,6 +44,8 @@ func run() error {
 		turnTimeout    = flag.Duration("turn-timeout", envDuration("AGENTRUN_TURN_TIMEOUT", 30*time.Minute), "maximum duration of one agent turn")
 		sessionTTL     = flag.Duration("session-ttl", envDuration("AGENTRUN_SESSION_TTL", 10*time.Minute), "idle process lifetime")
 		sessionStore   = flag.String("session-store", env("AGENTRUN_SESSION_STORE", defaultSessionStore()), "native session metadata file (empty disables persistence)")
+		heartbeat      = flag.Duration("stream-heartbeat", envDuration("AGENTRUN_STREAM_HEARTBEAT", 20*time.Second), "idle interval before an empty stream delta is sent (negative disables)")
+		thinkingBudget = flag.Int("claude-thinking-budget", envInt("AGENTRUN_CLAUDE_THINKING_BUDGET", 0), "Claude Code extended-thinking token budget (0 leaves thinking off)")
 		shutdownGrace  = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
 	)
 	flag.Var(&allowedRoots, "allowed-root", "allowed agent working-directory root (repeatable; empty allows any absolute path)")
@@ -83,13 +85,15 @@ func run() error {
 			"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000},
 			"codex":       {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
 		},
-		DefaultCWD:   *defaultCWD,
-		AllowedRoots: resolvedRoots,
-		APIKey:       *apiKey,
-		TurnTimeout:  *turnTimeout,
-		SessionTTL:   *sessionTTL,
-		SessionStore: *sessionStore,
-		Logger:       logger,
+		DefaultCWD:           *defaultCWD,
+		AllowedRoots:         resolvedRoots,
+		APIKey:               *apiKey,
+		TurnTimeout:          *turnTimeout,
+		SessionTTL:           *sessionTTL,
+		SessionStore:         *sessionStore,
+		StreamHeartbeat:      *heartbeat,
+		ClaudeThinkingBudget: *thinkingBudget,
+		Logger:               logger,
 	})
 	defer handler.Close()
 

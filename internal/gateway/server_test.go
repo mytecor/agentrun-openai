@@ -30,6 +30,7 @@ type fakeEngine struct {
 	models          []agentrun.ModelInfo
 	listErr         error
 	effectiveModel  string
+	thinking        bool
 }
 
 func (e *fakeEngine) Validate() error { return nil }
@@ -58,7 +59,7 @@ func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...age
 	}
 	p := &fakeProcess{
 		output: make(chan agentrun.Message, 16), resumeID: resumeID, replayOnStart: resumed,
-		missingOnStart: resumed && e.failResumeTurn, model: session.Model,
+		missingOnStart: resumed && e.failResumeTurn, model: session.Model, thinking: e.thinking,
 	}
 	if e.effectiveModel != "" {
 		p.model = e.effectiveModel
@@ -76,6 +77,7 @@ type fakeProcess struct {
 	replayOnStart  bool
 	missingOnStart bool
 	model          string
+	thinking       bool
 }
 
 func (p *fakeProcess) Output() <-chan agentrun.Message { return p.output }
@@ -100,6 +102,11 @@ func (p *fakeProcess) Send(_ context.Context, prompt string) error {
 		init.Model = p.model
 	}
 	p.output <- agentrun.Message{Type: agentrun.MessageInit, ResumeID: p.resumeID, Init: init}
+	if p.thinking {
+		p.output <- agentrun.Message{Type: agentrun.MessageThinkingDelta, Content: "let me "}
+		p.output <- agentrun.Message{Type: agentrun.MessageThinkingDelta, Content: "consider"}
+		p.output <- agentrun.Message{Type: agentrun.MessageThinking, Content: "let me consider"}
+	}
 	p.output <- agentrun.Message{Type: agentrun.MessageTextDelta, Content: "answer: "}
 	p.output <- agentrun.Message{Type: agentrun.MessageTextDelta, Content: prompt}
 	p.output <- agentrun.Message{Type: agentrun.MessageText, Content: "answer: " + prompt}
