@@ -1,28 +1,27 @@
 # agentrun-openai
 
-An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://github.com/dmora/agentrun). It exposes complete coding agents as models while keeping their tools, subprocesses, and subagents inside the agent runtime.
+An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://github.com/dmora/agentrun). It exposes complete coding agents as models, keeping their tools, subprocesses, and subagents inside the agent runtime.
 
 ## Endpoints
 
 - `GET /healthz`
-- `GET /v1/models` (also available as `GET /models`)
-- `POST /v1/chat/completions` with `stream: false` or `stream: true`
+- `GET /v1/models` (also `GET /models`)
+- `POST /v1/chat/completions`, with `stream` either way
 
-Built-in models:
+Model IDs:
 
-- `claude-code` uses agentrun's persistent Claude Code streaming backend.
-- `codex/<model-id>` uses agentrun's persistent ACP backend and a `codex-acp` executable.
-- `claude-code/<model-id>` uses agentrun's persistent Claude Code backend with an explicitly selected model.
+- `claude-code` and `codex` leave the model choice to the backend's own default.
+- `claude-code/<model-id>` and `codex/<model-id>` select one explicitly.
 
-Concrete Codex and Claude models are discovered through agentrun's public model-catalog API whenever `/models` is requested. Codex effort variants are grouped into one public entry per base model: select the reasoning level separately with the OpenAI-compatible `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, or `max`). The gateway uses `medium` by default and sends the base model and ACP `reasoning_effort` config option separately. The `codex` and `claude-code` IDs still delegate model choice to each backend's default and remain available alongside the discovered models. If discovery temporarily fails, the gateway retains the last known catalog; if no catalog has been obtained yet, the backend-default entry remains usable.
+Concrete models are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. Codex effort variants collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model.
 
 ## Install
 
-Requirements: an authenticated `claude` CLI, and/or a globally installed and authenticated `codex-acp` executable on `PATH`. Building from source additionally needs Go 1.24+.
+Requirements: an authenticated `claude` CLI and/or an authenticated `codex-acp` on `PATH`. Building from source also needs Go 1.24+.
 
-### Download a release binary
+### Release binary
 
-Each release publishes archives for Linux, macOS and Windows on `amd64` and `arm64`, alongside a `SHA256SUMS` file. Linux and macOS ship as `.tar.gz`, Windows as `.zip` holding `agentrun-openai.exe`.
+Releases carry Linux, macOS, and Windows builds for `amd64` and `arm64`, plus `SHA256SUMS`. Unix ships `.tar.gz`, Windows a `.zip` holding `agentrun-openai.exe`.
 
 ```sh
 VERSION=v0.1.0
@@ -35,48 +34,32 @@ sudo install -m 0755 "${NAME}/agentrun-openai" /usr/local/bin/agentrun-openai
 agentrun-openai --version
 ```
 
-Replace `VERSION` with the tag you want from the [releases page](https://github.com/mytecor/agentrun-openai/releases). To check the archive first, download `SHA256SUMS` from the same release and run `shasum -a 256 --ignore-missing -c SHA256SUMS` next to it.
+Available tags are on the [releases page](https://github.com/mytecor/agentrun-openai/releases). To verify a download, fetch `SHA256SUMS` beside it and run `shasum -a 256 --ignore-missing -c SHA256SUMS`.
 
-On Windows, download `agentrun-openai_<version>_windows_<arch>.zip` from the same page, unpack it, and put `agentrun-openai.exe` somewhere on `PATH`. One caveat applies there: stopping an agent is less graceful than on Unix. Windows has no SIGTERM, so a backend that does not exit when its input closes is terminated once the grace period expires rather than asked to shut down. Nothing leaks, but an agent gets less opportunity to finish writing.
+The binaries are unsigned. A browser download on macOS needs `xattr -d com.apple.quarantine /usr/local/bin/agentrun-openai`; the `curl` above avoids the flag entirely. On Windows, stopping an agent is blunter than elsewhere: the platform has no SIGTERM, so a backend that does not exit when its input closes is killed once the grace period ends.
 
-The binaries are not signed or notarized. Downloading them with `curl` as above avoids macOS quarantine; if you download through a browser instead, clear the flag with `xattr -d com.apple.quarantine /usr/local/bin/agentrun-openai`.
-
-### Install for the current user
-
-From the repository root, install the executable into a directory already present on `PATH`:
+### From source
 
 ```sh
 GOBIN="$HOME/.local/bin" go install ./cmd/agentrun-openai
-agentrun-openai --help
 ```
 
-Create `$HOME/.local/bin` and add it to `PATH` first if your shell does not already use it.
-
-### Install system-wide
-
-Build a release binary and install it into `/usr/local/bin`:
+Or system-wide:
 
 ```sh
 go build -trimpath -o agentrun-openai ./cmd/agentrun-openai
 sudo install -m 0755 agentrun-openai /usr/local/bin/agentrun-openai
-agentrun-openai --help
 ```
 
-To update an existing installation, pull the new project version and repeat the same build and `install` commands. The server runs as the current user, so `claude` and `codex-acp` must be available on that user's `PATH` and authenticated for that user.
+The server runs as the current user, so `claude` and `codex-acp` must be on that user's `PATH` and authenticated for them.
 
 ## Run
-
-```sh
-agentrun-openai
-```
-
-To select another port or listen interface:
 
 ```sh
 agentrun-openai --host 127.0.0.1 --port 9000
 ```
 
-The server listens on `127.0.0.1:8787` by default. Useful options:
+The default is `127.0.0.1:8787`. Options:
 
 ```text
 --host 127.0.0.1
@@ -92,29 +75,22 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --session-store "/path/to/sessions.json"
 --stream-heartbeat 20s
 --claude-thinking-budget 0
+--shutdown-timeout 10s
 --version
 ```
 
-`--allowed-root` is optional and repeatable. When at least one root is configured, `X-Agent-CWD` must resolve inside one of those directories; symlink escapes are rejected. With no allowed roots, any absolute working directory is accepted. The equivalent environment variable is `AGENTRUN_ALLOWED_ROOTS`, using the operating system's path-list separator.
+`--allowed-root` is repeatable, and equals `AGENTRUN_ALLOWED_ROOTS` using the OS path-list separator. With at least one root set, `X-Agent-CWD` must resolve inside one of them and symlink escapes are rejected; with none, any absolute path is accepted.
 
-Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity is resolved in this order:
-
-1. `X-Session-Affinity`
-2. `Session-ID`
-3. `session_id` (header)
-4. `X-Client-Request-ID`
-5. JSON `session_id`
-
-If none is present, the gateway creates a one-off ID and returns it as `X-Session-ID`.
+Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity comes from the first of `X-Session-Affinity`, `Session-ID`, the `session_id` header, `X-Client-Request-ID`, or JSON `session_id`. With none present the gateway mints an ID and returns it as `X-Session-ID`.
 
 ## Streaming and long tool runs
 
-Coding agents execute their own tools inside the backend, so a single turn can spend minutes reading files or running searches without emitting any text. The gateway keeps such a turn visible in two ways:
+A turn can spend minutes inside the agent's own tools without emitting text, so the gateway keeps it visible two ways:
 
-- Thinking output is streamed as `reasoning_content` deltas, separate from `content`. Reasoning is never written into the stored conversation transcript, so it cannot leak into a later turn's context. Codex reports thinking over ACP as `agent_thought_chunk` and its text arrives verbatim. Claude Code emits thinking blocks only when `--claude-thinking-budget` is above zero, and it redacts their text: every `thinking_delta` carries an empty string next to an opaque signature, so the gateway has nothing to forward. On that backend the heartbeat is what keeps the stream alive.
-- When a stream has been silent for `--stream-heartbeat` (20s by default), a keep-alive delta is sent. It carries a zero-width space as `reasoning_content` rather than an empty delta: OpenAI-compatible clients parse a chunk only when its delta holds a non-empty string, so an empty one keeps the socket open while still looking stalled — Pi's watchdog aborts the turn after 90s of that. The marker renders as nothing and is kept out of both the answer and the stored reasoning. Set a negative duration to disable the heartbeat, or use `AGENTRUN_STREAM_HEARTBEAT`.
+- Thinking is streamed as `reasoning_content` deltas, separate from `content`, and never enters the stored transcript. Codex sends its thought text verbatim. Claude Code emits thinking only above `--claude-thinking-budget` zero and redacts the text anyway, so there the heartbeat alone shows life.
+- After `--stream-heartbeat` of silence (20s) a keep-alive delta is sent. It carries a zero-width space, because OpenAI clients skip a chunk whose delta is empty and would still time out — Pi's watchdog aborts at 90s. The marker renders as nothing and stays out of both the answer and the stored reasoning. A negative duration disables it; `AGENTRUN_STREAM_HEARTBEAT` sets it too.
 
-Tool calls are not streamed as OpenAI `tool_calls`. The backend has already executed them, and an OpenAI client that received them would try to execute them again.
+Tool calls never cross the HTTP boundary as OpenAI `tool_calls`. The backend has already run them, and a client that received them would run them a second time.
 
 ## Pi configuration
 
@@ -124,7 +100,7 @@ Install [`pi-models-discovery`](https://www.npmjs.com/package/pi-models-discover
 pi install npm:pi-models-discovery
 ```
 
-Then mark the provider for discovery in `~/.pi/agent/models.json`. Pi obtains every served model from `GET /v1/models`, so no handwritten `models` array is needed.
+Then mark the provider for discovery in `~/.pi/agent/models.json`. Pi reads every served model from `GET /v1/models`, so no handwritten `models` array is needed.
 
 ```json
 {
@@ -147,40 +123,38 @@ Then mark the provider for discovery in `~/.pi/agent/models.json`. Pi obtains ev
 }
 ```
 
-To make every discovered agent model selectable, add `"agentrun/**"` to `enabledModels` in `~/.pi/agent/settings.json`. The double glob also matches nested IDs such as `agentrun/codex/gpt-5.6-sol`. Pi's thinking-level selector is sent as `reasoning_effort`; changing it creates a separate native session so a conversation never silently keeps the previous effort. If the discovery extension supplies a generic `thinkingLevelMap`, override it per discovered model with the persistent provider-level `modelOverrides` in `models.json`; do not edit the installed extension under `node_modules`. Run `/config:model-discovery-refresh` inside Pi after changing the server's model list.
+Add `"agentrun/**"` to `enabledModels` in `~/.pi/agent/settings.json` to make every discovered model selectable; the double glob also matches nested IDs such as `agentrun/codex/gpt-5.6-sol`. Run `/config:model-discovery-refresh` in Pi after the server's model list changes.
 
-The gateway keeps an idle Claude/Codex process for 10 minutes by default. It captures the backend's native resume ID and persists it with the working directory, message count, and a SHA-256 transcript fingerprint. Message text is not written to this store. After idle eviction or a server restart, a matching Pi history resumes the native backend session and sends only the newly appended turn. If the native session has expired or been deleted, the gateway automatically retries once with the complete supplied conversation. If the history diverges or the working directory changes, the saved resume ID is discarded and a fresh agent is started with the supplied branch as context.
+Pi's thinking-level selector arrives as `reasoning_effort`, and changing it starts a separate native session so a conversation never silently keeps the old effort. To replace a generic `thinkingLevelMap` from the extension, use provider-level `modelOverrides` in `models.json` rather than editing anything under `node_modules`.
 
-Internal agent tool calls are deliberately not exposed as OpenAI `tool_calls`; only assistant text crosses the HTTP boundary.
+## Sessions
 
-Because an OpenAI HTTP client cannot answer Claude/Codex interactive permission prompts, sessions run with agentrun's HITL mode disabled. Agents can therefore use their native tools within `X-Agent-CWD`; keep the server bound to localhost or configure `--api-key` before exposing it to a network.
+An idle Claude/Codex process is kept for 10 minutes. The gateway stores the backend's native resume ID with the working directory, message count, and a SHA-256 transcript fingerprint — never message text. After idle eviction or a restart, a matching history resumes the native session and sends only the new turn; if that session is gone, it retries once with the full conversation. A diverged history or a changed working directory discards the resume ID and starts a fresh agent with the supplied branch as context.
+
+Because an OpenAI HTTP client cannot answer interactive permission prompts, sessions run with agentrun's HITL mode disabled, so agents use their native tools freely within `X-Agent-CWD`. Keep the server on localhost or set `--api-key` before exposing it.
 
 ## Building and releasing
 
 `ci.yml` runs `gofmt`, `go vet`, `go test`, and a cross-compile of every released platform on each push to `main` and each pull request.
 
-`release.yml` produces the binaries. It never starts on its own: there is no push, tag or schedule trigger, only a manual run from the Actions tab or from the CLI.
+`release.yml` never starts on its own — no push, tag, or schedule trigger, only a manual run from the Actions tab or the CLI:
 
 ```sh
 gh workflow run release.yml -f bump=patch
 ```
 
-**Neither the version nor the tag is written by hand.** The run reads the highest existing `vX.Y.Z` tag and raises it by `bump` — `patch`, `minor`, or `major`, defaulting to `patch`. With no tags in the repository yet, the first release is `v0.1.0`. The resolved number is printed in the run log and in the run summary next to the previous tag, so it is visible before anything is published.
-
-Only plain `vX.Y.Z` tags seed the bump; pre-releases never do. To release one, or to jump to a specific number, pass it explicitly — it then overrides the bump:
+**Neither the version nor the tag is written by hand.** The run raises the highest existing `vX.Y.Z` tag by `bump` (`patch`, `minor`, `major`), starting at `v0.1.0` in a repository with no tags, and prints the result in the log and run summary before anything is published. Pre-release tags never seed a bump, so release candidates and jumps need an explicit version, which overrides the bump:
 
 ```sh
 gh workflow run release.yml -f version=v1.0.0-rc.1
 ```
 
-The run tests, builds the archives, and only then tags the checked-out commit and publishes a GitHub release carrying generated notes, every `*.tar.gz` and `*.zip`, and `SHA256SUMS`. Because tagging is the last step, a failed build leaves no tag and no release behind. An explicit version that is not `vX.Y.Z` (an optional `-rc.1` style suffix is allowed), or any version whose tag already exists, fails the run before anything is built.
+The run tests, builds, and only then tags the checked-out commit and publishes a release with generated notes, every archive, and `SHA256SUMS` — so a failed build leaves no tag behind. An explicit version that is not `vX.Y.Z` (an optional `-rc.1` suffix is fine), or one whose tag exists, fails before anything is built. Add `-f dry_run=true` to build the archives as a workflow artifact without tagging or publishing.
 
-Add `-f dry_run=true` to resolve the version and build the archives as a workflow artifact without creating a tag or publishing a release. The summary then reports which version the run would have released.
-
-Both workflows call `scripts/build-release.sh`, which also runs locally:
+Both workflows call `scripts/build-release.sh`, which also runs locally and writes to `dist/`:
 
 ```sh
 scripts/build-release.sh v0.1.0
 ```
 
-Archives and checksums land in `dist/`. The argument is stamped into the binary through `-ldflags -X main.version=...` and reported by `agentrun-openai --version`; with no argument the script falls back to `git describe`.
+The argument is stamped in through `-ldflags -X main.version=...` and reported by `agentrun-openai --version`; with no argument the script falls back to `git describe`.
