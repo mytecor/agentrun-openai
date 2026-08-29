@@ -160,14 +160,20 @@ Because an OpenAI HTTP client cannot answer Claude/Codex interactive permission 
 `release.yml` produces the binaries. It never starts on its own: there is no push, tag or schedule trigger, only a manual run from the Actions tab or from the CLI.
 
 ```sh
-gh workflow run release.yml -f version=v0.1.0
+gh workflow run release.yml -f bump=patch
 ```
 
-**Do not create the tag yourself** — the run creates it. It validates the version, runs the tests, builds the archives, and only then tags the checked-out commit and publishes a GitHub release carrying generated notes, every `*.tar.gz`, and `SHA256SUMS`. Because tagging is the last step, a failed build leaves no tag and no release behind.
+**Neither the version nor the tag is written by hand.** The run reads the highest existing `vX.Y.Z` tag and raises it by `bump` — `patch`, `minor`, or `major`, defaulting to `patch`. With no tags in the repository yet, the first release is `v0.1.0`. The resolved number is printed in the run log and in the run summary next to the previous tag, so it is visible before anything is published.
 
-The run stops before building if the version is not `vX.Y.Z` (an optional `-rc.1` style suffix is allowed) or if that tag already exists.
+Only plain `vX.Y.Z` tags seed the bump; pre-releases never do. To release one, or to jump to a specific number, pass it explicitly — it then overrides the bump:
 
-Add `-f dry_run=true` to build the archives and keep them as a workflow artifact without creating a tag or publishing a release.
+```sh
+gh workflow run release.yml -f version=v1.0.0-rc.1
+```
+
+The run tests, builds the archives, and only then tags the checked-out commit and publishes a GitHub release carrying generated notes, every `*.tar.gz`, and `SHA256SUMS`. Because tagging is the last step, a failed build leaves no tag and no release behind. An explicit version that is not `vX.Y.Z` (an optional `-rc.1` style suffix is allowed), or any version whose tag already exists, fails the run before anything is built.
+
+Add `-f dry_run=true` to resolve the version and build the archives as a workflow artifact without creating a tag or publishing a release. The summary then reports which version the run would have released.
 
 Both workflows call `scripts/build-release.sh`, which also runs locally:
 

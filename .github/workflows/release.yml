@@ -1,13 +1,21 @@
 name: release
 
-# Manual only: no push, tag or schedule trigger. The run creates the tag
-# itself, so nothing has to be tagged beforehand.
+run-name: "release ${{ inputs.version || inputs.bump }}"
+
+# Manual only: no push, tag or schedule trigger. The run derives the version
+# from the latest tag and creates the tag itself.
 on:
   workflow_dispatch:
     inputs:
+      bump:
+        description: "How to raise the latest tag when no version is given."
+        type: choice
+        options: [patch, minor, major]
+        default: patch
       version:
-        description: "Release version, e.g. v0.1.0. This run creates the tag."
-        required: true
+        description: "Optional exact version, e.g. v1.2.3. Overrides the bump."
+        required: false
+        default: ""
       dry_run:
         description: "Build the archives only: no tag, no release."
         type: boolean
@@ -25,18 +33,64 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate version
+      - name: Resolve version
+        id: resolve
         env:
-          VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump }}
         run: |
-          if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
-            echo "::error::version must look like v1.2.3 or v1.2.3-rc.1, got '$VERSION'"
+          set -euo pipefail
+
+          # Only plain vX.Y.Z tags seed a bump; pre-releases must be explicit.
+          latest="$(git tag --list 'v*' --sort=-v:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+            if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+              echo "::error::version must look like v1.2.3 or v1.2.3-rc.1, got '$version'"
+              exit 1
+            fi
+          elif [ -z "$latest" ]; then
+            version=v0.1.0
+          else
+            base="${latest#v}"
+            major="${base%%.*}"
+            rest="${base#*.}"
+            minor="${rest%%.*}"
+            patch="${rest#*.}"
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch) patch=$((patch + 1)) ;;
+              *) echo "::error::unknown bump '$BUMP'"; exit 1 ;;
+            esac
+            version="v${major}.${minor}.${patch}"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            echo "::error::tag $version already exists"
             exit 1
           fi
-          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
-            echo "::error::tag $VERSION already exists"
-            exit 1
+
+          if [ -n "$INPUT_VERSION" ]; then
+            src="given explicitly"
+          else
+            src="$BUMP bump of ${latest:-no previous tag}"
           fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "resolved version: $version ($src)"
+          {
+            echo "## Release \`$version\`"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| version | \`$version\` |"
+            echo "| previous tag | \`${latest:-none}\` |"
+            echo "| source | $src |"
+            echo "| commit | \`${GITHUB_SHA:0:7}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-go@v6
         with:
@@ -47,12 +101,12 @@ jobs:
 
       - name: Build binaries
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: scripts/build-release.sh "$VERSION"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: agentrun-openai-${{ inputs.version }}
+          name: agentrun-openai-${{ steps.resolve.outputs.version }}
           path: dist/
 
       # Runs last on purpose: the tag is created by `gh release create`, so a
@@ -61,10 +115,21 @@ jobs:
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          gh release create "$VERSION" \
+          set -euo pipefail
+          url="$(gh release create "$VERSION" \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
             --generate-notes \
-            dist/*.tar.gz dist/SHA256SUMS
+            dist/*.tar.gz dist/SHA256SUMS)"
+          echo "published: $url"
+          printf '\n**Published:** %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report dry run
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          echo "dry run: would have tagged $VERSION"
+          printf '\n**Dry run** - no tag created. Would have released `%s`.\n' "$VERSION" >> "$GITHUB_STEP_SUMMARY"
