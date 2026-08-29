@@ -18,7 +18,26 @@ Concrete Codex and Claude models are discovered through agentrun's public model-
 
 ## Install
 
-Requirements: Go 1.24+, an authenticated `claude` CLI, and/or a globally installed and authenticated `codex-acp` executable on `PATH`.
+Requirements: an authenticated `claude` CLI, and/or a globally installed and authenticated `codex-acp` executable on `PATH`. Building from source additionally needs Go 1.24+.
+
+### Download a release binary
+
+Every `v*` tag publishes archives through GitHub Actions for Linux and macOS on `amd64` and `arm64`, alongside a `SHA256SUMS` file. There is no Windows build: the underlying agent engines are Unix-only.
+
+```sh
+VERSION=v0.1.0
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+NAME="agentrun-openai_${VERSION}_${OS}_${ARCH}"
+curl -fsSLO "https://github.com/mytecor/agentrun-openai/releases/download/${VERSION}/${NAME}.tar.gz"
+tar -xzf "${NAME}.tar.gz"
+sudo install -m 0755 "${NAME}/agentrun-openai" /usr/local/bin/agentrun-openai
+agentrun-openai --version
+```
+
+Replace `VERSION` with the tag you want from the [releases page](https://github.com/mytecor/agentrun-openai/releases). To check the archive first, download `SHA256SUMS` from the same release and run `shasum -a 256 --ignore-missing -c SHA256SUMS` next to it.
+
+The binaries are not signed or notarized. Downloading them with `curl` as above avoids macOS quarantine; if you download through a browser instead, clear the flag with `xattr -d com.apple.quarantine /usr/local/bin/agentrun-openai`.
 
 ### Install for the current user
 
@@ -71,6 +90,7 @@ The server listens on `127.0.0.1:8787` by default. Useful options:
 --session-store "/path/to/sessions.json"
 --stream-heartbeat 20s
 --claude-thinking-budget 0
+--version
 ```
 
 `--allowed-root` is optional and repeatable. When at least one root is configured, `X-Agent-CWD` must resolve inside one of those directories; symlink escapes are rejected. With no allowed roots, any absolute working directory is accepted. The equivalent environment variable is `AGENTRUN_ALLOWED_ROOTS`, using the operating system's path-list separator.
@@ -132,3 +152,24 @@ The gateway keeps an idle Claude/Codex process for 10 minutes by default. It cap
 Internal agent tool calls are deliberately not exposed as OpenAI `tool_calls`; only assistant text crosses the HTTP boundary.
 
 Because an OpenAI HTTP client cannot answer Claude/Codex interactive permission prompts, sessions run with agentrun's HITL mode disabled. Agents can therefore use their native tools within `X-Agent-CWD`; keep the server bound to localhost or configure `--api-key` before exposing it to a network.
+
+## Building and releasing
+
+`ci.yml` runs `gofmt`, `go vet`, `go test`, and a cross-compile of every released platform on each push to `main` and each pull request.
+
+`release.yml` produces the binaries. Pushing a `v*` tag builds the archives, generates release notes, and attaches every `*.tar.gz` plus `SHA256SUMS` to a new GitHub release:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Starting the same workflow by hand from the Actions tab builds the identical archives and uploads them as a workflow artifact **without** publishing a release, which is the way to check a build before tagging.
+
+Both workflows call `scripts/build-release.sh`, which also runs locally:
+
+```sh
+scripts/build-release.sh v0.1.0
+```
+
+Archives and checksums land in `dist/`. The argument is stamped into the binary through `-ldflags -X main.version=...` and reported by `agentrun-openai --version`; with no argument the script falls back to `git describe`.

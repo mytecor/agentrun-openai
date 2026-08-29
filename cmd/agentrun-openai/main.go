@@ -24,6 +24,10 @@ import (
 	"github.com/mytecor/agentrun-openai/internal/gateway"
 )
 
+// version identifies the build. Release binaries set it with
+// -ldflags "-X main.version=<tag>"; source builds report "dev".
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -47,9 +51,14 @@ func run() error {
 		heartbeat      = flag.Duration("stream-heartbeat", envDuration("AGENTRUN_STREAM_HEARTBEAT", 20*time.Second), "idle interval before a keep-alive stream delta is sent (negative disables)")
 		thinkingBudget = flag.Int("claude-thinking-budget", envInt("AGENTRUN_CLAUDE_THINKING_BUDGET", 0), "Claude Code extended-thinking token budget (0 leaves thinking off)")
 		shutdownGrace  = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
+		showVersion    = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Var(&allowedRoots, "allowed-root", "allowed agent working-directory root (repeatable; empty allows any absolute path)")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 	if strings.TrimSpace(*host) == "" {
 		return errors.New("host must not be empty")
 	}
