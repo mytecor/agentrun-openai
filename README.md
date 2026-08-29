@@ -10,48 +10,28 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 
 Model IDs:
 
-- `claude-code` and `codex` leave the model choice to the backend's own default.
+- `claude-code`, `codex`, and `agy` leave the model choice to the backend's own default.
 - `claude-code/<model-id>` and `codex/<model-id>` select one explicitly.
 
-Concrete models are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. Codex effort variants collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model.
+`agy` runs the Antigravity CLI, which advertises no model catalog, so it stays a single entry with no sub-models. Concrete models for the other two are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. Codex effort variants collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model.
 
 ## Install
 
-Requirements: an authenticated `claude` CLI and/or an authenticated `codex-acp` on `PATH`. Building from source also needs Go 1.24+.
+Requirements: at least one authenticated agent CLI on `PATH` — `claude`, `codex-acp`, or Antigravity's `agy`.
 
-### Release binary
+Download the archive for your platform from the [releases page](https://github.com/mytecor/agentrun-openai/releases) and put the binary on `PATH`. Builds cover Linux, macOS, and Windows on `amd64` and `arm64`, and every release carries `SHA256SUMS`. The binaries are unsigned, so a macOS download through a browser needs `xattr -d com.apple.quarantine` before the first run.
 
-Releases carry Linux, macOS, and Windows builds for `amd64` and `arm64`, plus `SHA256SUMS`. Unix ships `.tar.gz`, Windows a `.zip` holding `agentrun-openai.exe`.
+### Build from source
 
-```sh
-VERSION=v0.1.0
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-NAME="agentrun-openai_${VERSION}_${OS}_${ARCH}"
-curl -fsSLO "https://github.com/mytecor/agentrun-openai/releases/download/${VERSION}/${NAME}.tar.gz"
-tar -xzf "${NAME}.tar.gz"
-sudo install -m 0755 "${NAME}/agentrun-openai" /usr/local/bin/agentrun-openai
-agentrun-openai --version
-```
-
-Available tags are on the [releases page](https://github.com/mytecor/agentrun-openai/releases). To verify a download, fetch `SHA256SUMS` beside it and run `shasum -a 256 --ignore-missing -c SHA256SUMS`.
-
-The binaries are unsigned. A browser download on macOS needs `xattr -d com.apple.quarantine /usr/local/bin/agentrun-openai`; the `curl` above avoids the flag entirely. On Windows, stopping an agent is blunter than elsewhere: the platform has no SIGTERM, so a backend that does not exit when its input closes is killed once the grace period ends.
-
-### From source
+Needs Go 1.24+. The module pins its agentrun dependency with a `replace` directive, which `go install <module>@latest` rejects, so clone first:
 
 ```sh
+git clone https://github.com/mytecor/agentrun-openai
+cd agentrun-openai
 GOBIN="$HOME/.local/bin" go install ./cmd/agentrun-openai
 ```
 
-Or system-wide:
-
-```sh
-go build -trimpath -o agentrun-openai ./cmd/agentrun-openai
-sudo install -m 0755 agentrun-openai /usr/local/bin/agentrun-openai
-```
-
-The server runs as the current user, so `claude` and `codex-acp` must be on that user's `PATH` and authenticated for them.
+The server runs as the current user, so the agent CLIs must be on that user's `PATH` and authenticated for them.
 
 ## Run
 
@@ -69,6 +49,7 @@ The default is `127.0.0.1:8787`. Options:
 --allowed-root /absolute/path/to/projects
 --claude-binary claude
 --codex-acp-binary codex-acp
+--agy-binary agy
 --codex-acp-args arg1,arg2
 --turn-timeout 30m
 --session-ttl 10m
@@ -129,7 +110,7 @@ Pi's thinking-level selector arrives as `reasoning_effort`, and changing it star
 
 ## Sessions
 
-An idle Claude/Codex process is kept for 10 minutes. The gateway stores the backend's native resume ID with the working directory, message count, and a SHA-256 transcript fingerprint — never message text. After idle eviction or a restart, a matching history resumes the native session and sends only the new turn; if that session is gone, it retries once with the full conversation. A diverged history or a changed working directory discards the resume ID and starts a fresh agent with the supplied branch as context.
+An idle agent process is kept for 10 minutes. On Windows shutting one down is blunter than elsewhere: the platform has no SIGTERM, so a backend that does not exit when its input closes is killed once the grace period ends. The gateway stores the backend's native resume ID with the working directory, message count, and a SHA-256 transcript fingerprint — never message text. After idle eviction or a restart, a matching history resumes the native session and sends only the new turn; if that session is gone, it retries once with the full conversation. A diverged history or a changed working directory discards the resume ID and starts a fresh agent with the supplied branch as context.
 
 Because an OpenAI HTTP client cannot answer interactive permission prompts, sessions run with agentrun's HITL mode disabled, so agents use their native tools freely within `X-Agent-CWD`. Keep the server on localhost or set `--api-key` before exposing it.
 

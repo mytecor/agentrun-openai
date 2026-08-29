@@ -19,6 +19,7 @@ import (
 	"github.com/dmora/agentrun"
 	"github.com/dmora/agentrun/engine/acp"
 	"github.com/dmora/agentrun/engine/cli"
+	"github.com/dmora/agentrun/engine/cli/agy"
 	"github.com/dmora/agentrun/engine/cli/claude"
 
 	"github.com/mytecor/agentrun-openai/internal/gateway"
@@ -44,6 +45,7 @@ func run() error {
 		defaultCWD     = flag.String("default-cwd", os.Getenv("AGENTRUN_DEFAULT_CWD"), "default agent working directory")
 		claudeBinary   = flag.String("claude-binary", env("AGENTRUN_CLAUDE_BINARY", "claude"), "Claude Code binary")
 		codexACPBinary = flag.String("codex-acp-binary", env("AGENTRUN_CODEX_ACP_BINARY", "codex-acp"), "Codex ACP binary")
+		agyBinary      = flag.String("agy-binary", env("AGENTRUN_AGY_BINARY", "agy"), "Antigravity CLI binary")
 		codexArgs      = flag.String("codex-acp-args", os.Getenv("AGENTRUN_CODEX_ACP_ARGS"), "comma-separated Codex ACP arguments")
 		turnTimeout    = flag.Duration("turn-timeout", envDuration("AGENTRUN_TURN_TIMEOUT", 30*time.Minute), "maximum duration of one agent turn")
 		sessionTTL     = flag.Duration("session-ttl", envDuration("AGENTRUN_SESSION_TTL", 10*time.Minute), "idle process lifetime")
@@ -80,6 +82,7 @@ func run() error {
 	}
 	engines := map[string]agentrun.Engine{
 		"claude-code": cli.NewEngine(claude.New(claude.WithBinary(*claudeBinary))),
+		"agy":         cli.NewEngine(agy.New(agy.WithBinary(*agyBinary))),
 		"codex": acp.NewEngine(
 			acp.WithBinary(*codexACPBinary),
 			acp.WithArgs(splitArgs(*codexArgs)...),
@@ -93,6 +96,7 @@ func run() error {
 		ModelDetails: map[string]gateway.ModelDetails{
 			"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000},
 			"codex":       {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
+			"agy":         {Name: "Antigravity", ContextWindow: 200000, MaxTokens: 32000},
 		},
 		DefaultCWD:           *defaultCWD,
 		AllowedRoots:         resolvedRoots,
