@@ -37,7 +37,7 @@ type Config struct {
 	TurnTimeout  time.Duration
 	SessionTTL   time.Duration
 	SessionStore string
-	// StreamHeartbeat is how long a stream may stay silent before an empty
+	// StreamHeartbeat is how long a stream may stay silent before a keep-alive
 	// delta is emitted. Zero selects the default; negative disables it.
 	StreamHeartbeat time.Duration
 	// ClaudeThinkingBudget caps Claude Code's extended-thinking tokens. Claude

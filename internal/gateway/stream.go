@@ -11,6 +11,13 @@ import (
 	"github.com/dmora/agentrun"
 )
 
+// heartbeatMarker is what a keep-alive delta carries. An empty delta keeps the
+// TCP connection open but is invisible to OpenAI-compatible clients: they parse
+// a chunk only when it holds a non-empty string, so a stall detector watching
+// for progress still sees a dead stream. A zero-width space is non-empty on the
+// wire and renders as nothing.
+const heartbeatMarker = "\u200b"
+
 type collector struct {
 	w              http.ResponseWriter
 	stream         bool
@@ -129,7 +136,7 @@ func (c *collector) appendReasoning(text string) {
 	}
 }
 
-// startHeartbeat emits an empty delta whenever the stream has been silent for
+// startHeartbeat emits a keep-alive delta whenever the stream has been silent for
 // interval. A coding agent runs its own tools between text blocks, so a turn
 // can legitimately produce no output for minutes; without a heartbeat, client
 // stall detectors abort the request mid-turn. The returned function stops the
@@ -172,7 +179,7 @@ func (c *collector) beat(interval time.Duration) {
 	if c.closed || time.Since(c.lastWrite) < interval {
 		return
 	}
-	c.writeChunkLocked(map[string]string{}, nil, nil)
+	c.writeChunkLocked(map[string]string{"reasoning_content": heartbeatMarker}, nil, nil)
 }
 
 func (c *collector) resetForFreshSession() {
