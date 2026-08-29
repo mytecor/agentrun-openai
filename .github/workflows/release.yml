@@ -122,7 +122,7 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
             --generate-notes \
-            dist/*.tar.gz dist/SHA256SUMS)"
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS)"
           echo "published: $url"
           printf '\n**Published:** %s\n' "$url" >> "$GITHUB_STEP_SUMMARY"
 

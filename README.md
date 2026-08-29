@@ -22,7 +22,7 @@ Requirements: an authenticated `claude` CLI, and/or a globally installed and aut
 
 ### Download a release binary
 
-Each release publishes archives for Linux and macOS on `amd64` and `arm64`, alongside a `SHA256SUMS` file. There is no Windows build: the underlying agent engines are Unix-only.
+Each release publishes archives for Linux, macOS and Windows on `amd64` and `arm64`, alongside a `SHA256SUMS` file. Linux and macOS ship as `.tar.gz`, Windows as `.zip` holding `agentrun-openai.exe`.
 
 ```sh
 VERSION=v0.1.0
@@ -36,6 +36,8 @@ agentrun-openai --version
 ```
 
 Replace `VERSION` with the tag you want from the [releases page](https://github.com/mytecor/agentrun-openai/releases). To check the archive first, download `SHA256SUMS` from the same release and run `shasum -a 256 --ignore-missing -c SHA256SUMS` next to it.
+
+On Windows, download `agentrun-openai_<version>_windows_<arch>.zip` from the same page, unpack it, and put `agentrun-openai.exe` somewhere on `PATH`. One caveat applies there: stopping an agent is less graceful than on Unix. Windows has no SIGTERM, so a backend that does not exit when its input closes is terminated once the grace period expires rather than asked to shut down. Nothing leaks, but an agent gets less opportunity to finish writing.
 
 The binaries are not signed or notarized. Downloading them with `curl` as above avoids macOS quarantine; if you download through a browser instead, clear the flag with `xattr -d com.apple.quarantine /usr/local/bin/agentrun-openai`.
 
@@ -171,7 +173,7 @@ Only plain `vX.Y.Z` tags seed the bump; pre-releases never do. To release one, o
 gh workflow run release.yml -f version=v1.0.0-rc.1
 ```
 
-The run tests, builds the archives, and only then tags the checked-out commit and publishes a GitHub release carrying generated notes, every `*.tar.gz`, and `SHA256SUMS`. Because tagging is the last step, a failed build leaves no tag and no release behind. An explicit version that is not `vX.Y.Z` (an optional `-rc.1` style suffix is allowed), or any version whose tag already exists, fails the run before anything is built.
+The run tests, builds the archives, and only then tags the checked-out commit and publishes a GitHub release carrying generated notes, every `*.tar.gz` and `*.zip`, and `SHA256SUMS`. Because tagging is the last step, a failed build leaves no tag and no release behind. An explicit version that is not `vX.Y.Z` (an optional `-rc.1` style suffix is allowed), or any version whose tag already exists, fails the run before anything is built.
 
 Add `-f dry_run=true` to resolve the version and build the archives as a workflow artifact without creating a tag or publishing a release. The summary then reports which version the run would have released.
 
