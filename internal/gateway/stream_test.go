@@ -96,8 +96,10 @@ func TestNonStreamKeepsThinkingOutOfContent(t *testing.T) {
 }
 
 // A coding agent runs its tools inside the backend, so a turn can stay silent
-// for minutes. Without a heartbeat, clients with stall detectors abort it.
-func TestHeartbeatEmitsEmptyDeltasWhileSilent(t *testing.T) {
+// for minutes. Without a heartbeat, clients with stall detectors abort it. The
+// beat has to carry a non-empty string: OpenAI-compatible clients ignore a
+// chunk whose delta holds nothing, so an empty one never counts as progress.
+func TestHeartbeatEmitsNonEmptyDeltasWhileSilent(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	collector := newCollector(recorder, true, "chatcmpl-test", 0, "test-agent", false, nil)
 	if err := collector.startStream(); err != nil {
@@ -108,15 +110,34 @@ func TestHeartbeatEmitsEmptyDeltasWhileSilent(t *testing.T) {
 	stop()
 	collector.finishStream()
 
-	empty := 0
+	beats := 0
 	for _, delta := range streamDeltas(t, recorder.Body.String()) {
-		if len(delta) == 0 {
-			empty++
+		if delta["reasoning_content"] == heartbeatMarker {
+			beats++
 		}
 	}
-	// One empty delta closes the stream; heartbeats are the rest.
-	if empty < 3 {
-		t.Errorf("empty deltas = %d, want at least 3 (heartbeats plus the final chunk)", empty)
+	if beats < 3 {
+		t.Errorf("heartbeats = %d, want at least 3", beats)
+	}
+}
+
+// The heartbeat marker must not reach the answer or the recorded reasoning: it
+// reports that the connection is alive, not anything the model said.
+func TestHeartbeatStaysOutOfRecordedOutput(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	collector := newCollector(recorder, true, "chatcmpl-test", 0, "test-agent", false, nil)
+	if err := collector.startStream(); err != nil {
+		t.Fatalf("startStream: %v", err)
+	}
+	stop := collector.startHeartbeat(10 * time.Millisecond)
+	time.Sleep(60 * time.Millisecond)
+	stop()
+
+	if strings.Contains(collector.text.String(), heartbeatMarker) {
+		t.Error("heartbeat leaked into the answer text")
+	}
+	if strings.Contains(collector.reasoning.String(), heartbeatMarker) {
+		t.Error("heartbeat leaked into the recorded reasoning")
 	}
 }
 
@@ -134,7 +155,7 @@ func TestHeartbeatStaysSilentWhileTextFlows(t *testing.T) {
 	stop()
 
 	for _, delta := range streamDeltas(t, recorder.Body.String()) {
-		if len(delta) == 0 {
+		if delta["reasoning_content"] == heartbeatMarker {
 			t.Fatal("heartbeat fired while the stream was still producing text")
 		}
 	}
@@ -171,7 +192,7 @@ func TestHeartbeatDisabled(t *testing.T) {
 	stop()
 
 	for _, delta := range streamDeltas(t, recorder.Body.String()) {
-		if len(delta) == 0 {
+		if delta["reasoning_content"] == heartbeatMarker {
 			t.Fatal("heartbeat fired although it was disabled")
 		}
 	}
