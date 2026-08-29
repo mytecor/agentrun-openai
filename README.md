@@ -22,7 +22,7 @@ Requirements: an authenticated `claude` CLI, and/or a globally installed and aut
 
 ### Download a release binary
 
-Every `v*` tag publishes archives through GitHub Actions for Linux and macOS on `amd64` and `arm64`, alongside a `SHA256SUMS` file. There is no Windows build: the underlying agent engines are Unix-only.
+Each release publishes archives for Linux and macOS on `amd64` and `arm64`, alongside a `SHA256SUMS` file. There is no Windows build: the underlying agent engines are Unix-only.
 
 ```sh
 VERSION=v0.1.0
@@ -157,14 +157,17 @@ Because an OpenAI HTTP client cannot answer Claude/Codex interactive permission 
 
 `ci.yml` runs `gofmt`, `go vet`, `go test`, and a cross-compile of every released platform on each push to `main` and each pull request.
 
-`release.yml` produces the binaries. Pushing a `v*` tag builds the archives, generates release notes, and attaches every `*.tar.gz` plus `SHA256SUMS` to a new GitHub release:
+`release.yml` produces the binaries. It never starts on its own: there is no push, tag or schedule trigger, only a manual run from the Actions tab or from the CLI.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+gh workflow run release.yml -f version=v0.1.0
 ```
 
-Starting the same workflow by hand from the Actions tab builds the identical archives and uploads them as a workflow artifact **without** publishing a release, which is the way to check a build before tagging.
+**Do not create the tag yourself** — the run creates it. It validates the version, runs the tests, builds the archives, and only then tags the checked-out commit and publishes a GitHub release carrying generated notes, every `*.tar.gz`, and `SHA256SUMS`. Because tagging is the last step, a failed build leaves no tag and no release behind.
+
+The run stops before building if the version is not `vX.Y.Z` (an optional `-rc.1` style suffix is allowed) or if that tag already exists.
+
+Add `-f dry_run=true` to build the archives and keep them as a workflow artifact without creating a tag or publishing a release.
 
 Both workflows call `scripts/build-release.sh`, which also runs locally:
 
