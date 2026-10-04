@@ -17,10 +17,6 @@ import (
 	"time"
 
 	"github.com/dmora/agentrun"
-	"github.com/dmora/agentrun/engine/acp"
-	"github.com/dmora/agentrun/engine/cli"
-	"github.com/dmora/agentrun/engine/cli/agy"
-	"github.com/dmora/agentrun/engine/cli/claude"
 
 	"github.com/mytecor/agentrun-openai/internal/gateway"
 )
@@ -39,25 +35,22 @@ func main() {
 func run() error {
 	allowedRoots := pathListFlag(splitPathList(os.Getenv("AGENTRUN_ALLOWED_ROOTS")))
 	var acpFlags acpFlagList
+	var effortFlags effortFormatFlagList
 	var (
-		host           = flag.String("host", env("AGENTRUN_HOST", "127.0.0.1"), "HTTP listen host")
-		port           = flag.Int("port", envInt("AGENTRUN_PORT", 8787), "HTTP listen port")
-		apiKey         = flag.String("api-key", os.Getenv("AGENTRUN_API_KEY"), "optional bearer token")
-		defaultCWD     = flag.String("default-cwd", os.Getenv("AGENTRUN_DEFAULT_CWD"), "default agent working directory")
-		claudeBinary   = flag.String("claude-binary", env("AGENTRUN_CLAUDE_BINARY", "claude"), "Claude Code binary")
-		codexACPBinary = flag.String("codex-acp-binary", env("AGENTRUN_CODEX_ACP_BINARY", "codex-acp"), "Codex ACP binary")
-		agyBinary      = flag.String("agy-binary", env("AGENTRUN_AGY_BINARY", "agy"), "Antigravity CLI binary")
-		codexArgs      = flag.String("codex-acp-args", os.Getenv("AGENTRUN_CODEX_ACP_ARGS"), "comma-separated Codex ACP arguments")
-		turnTimeout    = flag.Duration("turn-timeout", envDuration("AGENTRUN_TURN_TIMEOUT", 30*time.Minute), "maximum duration of one agent turn")
-		sessionTTL     = flag.Duration("session-ttl", envDuration("AGENTRUN_SESSION_TTL", 10*time.Minute), "idle process lifetime")
-		sessionStore   = flag.String("session-store", env("AGENTRUN_SESSION_STORE", defaultSessionStore()), "native session metadata file (empty disables persistence)")
-		heartbeat      = flag.Duration("stream-heartbeat", envDuration("AGENTRUN_STREAM_HEARTBEAT", 20*time.Second), "idle interval before a keep-alive stream delta is sent (negative disables)")
-		thinkingBudget = flag.Int("claude-thinking-budget", envInt("AGENTRUN_CLAUDE_THINKING_BUDGET", 0), "Claude Code extended-thinking token budget (0 leaves thinking off)")
-		shutdownGrace  = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
-		showVersion    = flag.Bool("version", false, "print the version and exit")
+		host          = flag.String("host", env("AGENTRUN_HOST", "127.0.0.1"), "HTTP listen host")
+		port          = flag.Int("port", envInt("AGENTRUN_PORT", 8787), "HTTP listen port")
+		apiKey        = flag.String("api-key", os.Getenv("AGENTRUN_API_KEY"), "optional bearer token")
+		defaultCWD    = flag.String("default-cwd", os.Getenv("AGENTRUN_DEFAULT_CWD"), "default agent working directory")
+		turnTimeout   = flag.Duration("turn-timeout", envDuration("AGENTRUN_TURN_TIMEOUT", 30*time.Minute), "maximum duration of one agent turn")
+		sessionTTL    = flag.Duration("session-ttl", envDuration("AGENTRUN_SESSION_TTL", 10*time.Minute), "idle process lifetime")
+		sessionStore  = flag.String("session-store", env("AGENTRUN_SESSION_STORE", defaultSessionStore()), "native session metadata file (empty disables persistence)")
+		heartbeat     = flag.Duration("stream-heartbeat", envDuration("AGENTRUN_STREAM_HEARTBEAT", 20*time.Second), "idle interval before a keep-alive stream delta is sent (negative disables)")
+		shutdownGrace = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
+		showVersion   = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Var(&allowedRoots, "allowed-root", "allowed agent working-directory root (repeatable; empty allows any absolute path)")
 	flag.Var(&acpFlags, "acp", "generic ACP backend specification: id=command [args...] (repeatable)")
+	flag.Var(&effortFlags, "effort-format", "reasoning effort model parsing format: [id=]format (repeatable; e.g. codex=bracket, bracket, none)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -79,9 +72,21 @@ func run() error {
 	if len(specs) == 0 {
 		specs = splitACPList(os.Getenv("AGENTRUN_ACP"))
 	}
+	if len(specs) == 0 {
+		return errors.New("no ACP backends configured: specify at least one via --acp or AGENTRUN_ACP (e.g. --acp codex=\"npx @agentclientprotocol/codex-acp\")")
+	}
 	acpBackends, err := gateway.ParseACPBackends(specs)
 	if err != nil {
 		return fmt.Errorf("configure acp backends: %w", err)
+	}
+
+	effortSpecs := []string(effortFlags)
+	if len(effortSpecs) == 0 {
+		effortSpecs = gateway.SplitEffortFormatList(os.Getenv("AGENTRUN_EFFORT_FORMAT"))
+	}
+	effortConfig, err := gateway.ParseEffortFormatSpecs(effortSpecs)
+	if err != nil {
+		return fmt.Errorf("configure effort formats: %w", err)
 	}
 
 	if *defaultCWD == "" {
@@ -91,45 +96,27 @@ func run() error {
 		}
 		*defaultCWD = cwd
 	}
-	engines := map[string]agentrun.Engine{
-		"claude-code": cli.NewEngine(claude.New(claude.WithBinary(*claudeBinary))),
-		"agy":         cli.NewEngine(agy.New(agy.WithBinary(*agyBinary))),
-		"codex": acp.NewEngine(
-			acp.WithBinary(*codexACPBinary),
-			acp.WithArgs(splitArgs(*codexArgs)...),
-			acp.WithStderrWriter(os.Stderr),
-		),
-	}
-	backendKinds := map[string]gateway.BackendKind{
-		"claude-code": gateway.BackendClaude,
-		"codex":       gateway.BackendCodexACP,
-		"agy":         gateway.BackendCLI,
-	}
-	modelDetails := map[string]gateway.ModelDetails{
-		"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000},
-		"codex":       {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
-		"agy":         {Name: "Antigravity", ContextWindow: 200000, MaxTokens: 32000},
-	}
+	engines := make(map[string]agentrun.Engine, len(acpBackends))
+	modelDetails := make(map[string]gateway.ModelDetails, len(acpBackends))
 	for _, b := range acpBackends {
 		engines[b.ID] = b.NewEngine(os.Stderr)
-		backendKinds[b.ID] = gateway.BackendGenericACP
 		modelDetails[b.ID] = gateway.ModelDetails{Name: b.ID}
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	handler := gateway.New(gateway.Config{
-		Engines:              engines,
-		BackendKinds:         backendKinds,
-		ModelDetails:         modelDetails,
-		DefaultCWD:           *defaultCWD,
-		AllowedRoots:         resolvedRoots,
-		APIKey:               *apiKey,
-		TurnTimeout:          *turnTimeout,
-		SessionTTL:           *sessionTTL,
-		SessionStore:         *sessionStore,
-		StreamHeartbeat:      *heartbeat,
-		ClaudeThinkingBudget: *thinkingBudget,
-		Logger:               logger,
+		Engines:             engines,
+		EffortFormats:       effortConfig.PerBackend,
+		DefaultEffortFormat: effortConfig.Default,
+		ModelDetails:        modelDetails,
+		DefaultCWD:          *defaultCWD,
+		AllowedRoots:        resolvedRoots,
+		APIKey:              *apiKey,
+		TurnTimeout:         *turnTimeout,
+		SessionTTL:          *sessionTTL,
+		SessionStore:        *sessionStore,
+		StreamHeartbeat:     *heartbeat,
+		Logger:              logger,
 	})
 	defer handler.Close()
 
@@ -183,6 +170,19 @@ func (f *acpFlagList) Set(value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return errors.New("acp backend specification must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+type effortFormatFlagList []string
+
+func (f *effortFormatFlagList) String() string { return strings.Join(*f, "; ") }
+
+func (f *effortFormatFlagList) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("effort format specification must not be empty")
 	}
 	*f = append(*f, value)
 	return nil
@@ -269,18 +269,4 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
-}
-
-func splitArgs(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part = strings.TrimSpace(part); part != "" {
-			result = append(result, part)
-		}
-	}
-	return result
 }

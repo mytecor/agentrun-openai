@@ -98,21 +98,25 @@ func TestParseACPBackendDuplicateID(t *testing.T) {
 	}
 }
 
-func TestParseACPBackendBuiltinConflictAndValidation(t *testing.T) {
-	conflicts := []string{
+func TestParseACPBackendAllowsStandardNames(t *testing.T) {
+	valid := []string{
 		"codex=custom-codex",
 		"claude-code=custom-claude",
 		"agy=custom-agy",
+		"pi=pi-acp",
 	}
-	for _, spec := range conflicts {
-		_, err := ParseACPBackend(spec)
-		if err == nil {
-			t.Errorf("expected error for built-in conflict %q, got nil", spec)
-		} else if !strings.Contains(err.Error(), "conflicts with built-in backend ID") {
-			t.Errorf("error = %q, want built-in conflict message", err.Error())
+	for _, spec := range valid {
+		b, err := ParseACPBackend(spec)
+		if err != nil {
+			t.Errorf("unexpected error for %q: %v", spec, err)
+		}
+		if b.ID == "" || b.Binary == "" {
+			t.Errorf("backend not parsed correctly: %#v", b)
 		}
 	}
+}
 
+func TestParseACPBackendValidation(t *testing.T) {
 	invalidSpecs := []struct {
 		spec    string
 		wantErr string

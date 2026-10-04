@@ -10,14 +10,14 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 
 Model IDs:
 
-- `claude-code`, `codex`, `agy`, and any configured generic ACP backends leave the model choice to the backend's own default.
-- `claude-code/<model-id>`, `codex/<model-id>`, and `<acp-id>/<model-id>` select one explicitly.
+- `<backend-id>` leaves the model choice to the backend's own default.
+- `<backend-id>/<model-id>` selects one explicitly.
 
-`agy` runs the Antigravity CLI, which advertises no model catalog, so it stays a single entry with no sub-models. Concrete models for the others are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. Codex effort variants collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model. Generic ACP backends publish discovered models directly without effort grouping.
+Concrete models for configured ACP backends are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. With `--effort-format <backend>=bracket` (or `--effort-format <backend>=codex`), effort variants (e.g. `gpt-5[low]`, `gpt-5[medium]`) collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model.
 
 ## Install
 
-Requirements: at least one authenticated agent CLI on `PATH` — `claude`, `codex-acp`, or Antigravity's `agy`.
+Requirements: at least one ACP-compliant agent or adapter (such as agents from the [ACP Registry](https://github.com/agentclientprotocol/registry)).
 
 Download the archive for your platform from the [releases page](https://github.com/mytecor/agentrun-openai/releases) and put the binary on `PATH`. Builds cover Linux, macOS, and Windows on `amd64` and `arm64`, and every release carries `SHA256SUMS`. The binaries are unsigned, so a macOS download through a browser needs `xattr -d com.apple.quarantine` before the first run.
 
@@ -36,7 +36,10 @@ The server runs as the current user, so the agent CLIs must be on that user's `P
 ## Run
 
 ```sh
-agentrun-openai --host 127.0.0.1 --port 9000
+agentrun-openai \
+  --acp codex="npx @agentclientprotocol/codex-acp" \
+  --effort-format codex=bracket \
+  --acp claude="npx @agentclientprotocol/claude-agent-acp"
 ```
 
 The default is `127.0.0.1:8787`. Options:
@@ -47,42 +50,53 @@ The default is `127.0.0.1:8787`. Options:
 --api-key local-secret
 --default-cwd /absolute/path/to/project
 --allowed-root /absolute/path/to/projects
---claude-binary claude
---codex-acp-binary codex-acp
---agy-binary agy
---codex-acp-args arg1,arg2
---acp pi=pi-acp
+--acp codex="npx @agentclientprotocol/codex-acp"
+--effort-format codex=bracket
 --turn-timeout 30m
 --session-ttl 10m
 --session-store "/path/to/sessions.json"
 --stream-heartbeat 20s
---claude-thinking-budget 0
 --shutdown-timeout 10s
 --version
 ```
 
 `--allowed-root` is repeatable, and equals `AGENTRUN_ALLOWED_ROOTS` using the OS path-list separator. With at least one root set, `X-Agent-CWD` must resolve inside one of them and symlink escapes are rejected; with none, any absolute path is accepted.
 
-`--acp` is repeatable (or configured via `AGENTRUN_ACP`), registering generic ACP backends.
+`--acp` is repeatable (or configured via `AGENTRUN_ACP`), registering ACP backends.
+
+`--effort-format` is repeatable (or configured via `AGENTRUN_EFFORT_FORMAT`), specifying reasoning effort parsing (`bracket`, `codex`, or `none`).
 
 Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity comes from the first of `X-Session-Affinity`, `Session-ID`, the `session_id` header, `X-Client-Request-ID`, or JSON `session_id`. With none present the gateway mints an ID and returns it as `X-Session-ID`.
 
-## Generic ACP backends
+## ACP backends and adapters
 
 Any ACP-compliant agent talking JSON-RPC over stdio can be registered without modifying source code using `--acp`:
 
 ```sh
-# Pi ACP
-agentrun-openai --acp pi=pi-acp
+# OpenAI Codex adapter with bracket effort parsing
+agentrun-openai \
+  --acp codex="npx @agentclientprotocol/codex-acp" \
+  --effort-format codex=bracket
 
 # Multiple ACP agents
 agentrun-openai \
+  --acp codex="npx @agentclientprotocol/codex-acp" \
+  --effort-format codex=bracket \
+  --acp claude="npx @agentclientprotocol/claude-agent-acp" \
   --acp pi=pi-acp \
-  --acp opencode="opencode acp" \
-  --acp gemini="gemini --experimental-acp"
+  --acp opencode="opencode acp"
 ```
 
 Command and arguments are passed directly to `exec` without shell interpretation (`/bin/sh -c`). The agent executable must speak the Agent Client Protocol (ACP) via JSON-RPC 2.0 over `stdin`/`stdout`.
+
+### Reasoning effort format (`--effort-format`)
+
+Adapters such as `@agentclientprotocol/codex-acp` expose reasoning effort variations as bracketed model IDs (e.g. `o3-mini[low]`, `o3-mini[medium]`, `o3-mini[high]`).
+
+Using `--effort-format`:
+- `codex=bracket` (or `--effort-format=codex`): collapses bracketed model names in `/v1/models` into single base models (`o3-mini`) with `reasoning_efforts: ["low", "medium", "high", ...]`.
+- In chat requests, passing `"reasoning_effort": "high"` automatically routes to the corresponding variant and passes `session_config.reasoning_effort` to the ACP session.
+- `none` (default): models are published directly without grouping.
 
 ### Model namespace
 
@@ -131,7 +145,7 @@ All existing features — session affinity, `--session-ttl`, idle eviction, nati
 
 A turn can spend minutes inside the agent's own tools without emitting text, so the gateway keeps it visible two ways:
 
-- Thinking is streamed as `reasoning_content` deltas, separate from `content`, and never enters the stored transcript. Codex sends its thought text verbatim. Claude Code emits thinking only above `--claude-thinking-budget` zero and redacts the text anyway, so there the heartbeat alone shows life.
+- Thinking is streamed as `reasoning_content` deltas, separate from `content`, and never enters the stored transcript. Agents stream their thought text according to ACP protocol events.
 - After `--stream-heartbeat` of silence (20s) a keep-alive delta is sent. It carries a zero-width space, because OpenAI clients skip a chunk whose delta is empty and would still time out — Pi's watchdog aborts at 90s. The marker renders as nothing and stays out of both the answer and the stored reasoning. A negative duration disables it; `AGENTRUN_STREAM_HEARTBEAT` sets it too.
 
 Tool calls never cross the HTTP boundary as OpenAI `tool_calls`. The backend has already run them, and a client that received them would run them a second time.

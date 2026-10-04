@@ -145,7 +145,6 @@ func TestGenericACPBaseModelInModelsList(t *testing.T) {
 	fake := &fakeEngine{listErr: errors.New("discovery failure")}
 	server := New(Config{
 		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
 		ModelDetails: map[string]ModelDetails{"pi": {Name: "Pi Agent"}},
 		DefaultCWD:   "/tmp",
 		TurnTimeout:  time.Second,
@@ -180,7 +179,6 @@ func TestDiscoveredGenericACPModelsNamespace(t *testing.T) {
 	}
 	server := New(Config{
 		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
 		ModelDetails: map[string]ModelDetails{"pi": {Name: "Pi"}},
 		DefaultCWD:   "/tmp",
 		TurnTimeout:  time.Second,
@@ -218,7 +216,6 @@ func TestGenericACPNoCodexEffortGrouping(t *testing.T) {
 	}
 	server := New(Config{
 		Engines:      map[string]agentrun.Engine{"custom-acp": fake},
-		BackendKinds: map[string]BackendKind{"custom-acp": BackendGenericACP},
 		ModelDetails: map[string]ModelDetails{"custom-acp": {Name: "Custom ACP"}},
 		DefaultCWD:   "/tmp",
 		TurnTimeout:  time.Second,
@@ -264,12 +261,11 @@ func TestGenericACPRequestWithSubModel(t *testing.T) {
 		},
 	}
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
-		DefaultCWD:   "/tmp",
-		TurnTimeout:  time.Second,
-		SessionTTL:   time.Hour,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:     map[string]agentrun.Engine{"pi": fake},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second,
+		SessionTTL:  time.Hour,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 
@@ -296,12 +292,11 @@ func TestGenericACPRequestWithBaseModel(t *testing.T) {
 		},
 	}
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
-		DefaultCWD:   "/tmp",
-		TurnTimeout:  time.Second,
-		SessionTTL:   time.Hour,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:     map[string]agentrun.Engine{"pi": fake},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second,
+		SessionTTL:  time.Hour,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 
@@ -329,13 +324,13 @@ func TestExistingCodexEffortBehaviorNotRegressed(t *testing.T) {
 		},
 	}
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"codex": fake},
-		BackendKinds: map[string]BackendKind{"codex": BackendCodexACP},
-		ModelDetails: map[string]ModelDetails{"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000}},
-		DefaultCWD:   "/tmp",
-		TurnTimeout:  time.Second,
-		SessionTTL:   time.Hour,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:       map[string]agentrun.Engine{"codex": fake},
+		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
+		ModelDetails:  map[string]ModelDetails{"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000}},
+		DefaultCWD:    "/tmp",
+		TurnTimeout:   time.Second,
+		SessionTTL:    time.Hour,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 
@@ -370,12 +365,11 @@ func TestExistingCodexEffortBehaviorNotRegressed(t *testing.T) {
 func TestGenericACPSessionAffinityAndIdleEviction(t *testing.T) {
 	fake := &fakeEngine{}
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
-		DefaultCWD:   "/tmp",
-		TurnTimeout:  time.Second,
-		SessionTTL:   time.Hour,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:     map[string]agentrun.Engine{"pi": fake},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second,
+		SessionTTL:  time.Hour,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 
@@ -437,7 +431,6 @@ func TestGenericACPEvictionResumesWithResumeID(t *testing.T) {
 	fake := &fakeEngine{}
 	server := New(Config{
 		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
 		DefaultCWD:   "/tmp",
 		TurnTimeout:  time.Second,
 		SessionTTL:   time.Hour,
@@ -505,12 +498,11 @@ func TestGenericACPDiscoveryRetainsCatalogOnFailure(t *testing.T) {
 		},
 	}
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"pi": fake},
-		BackendKinds: map[string]BackendKind{"pi": BackendGenericACP},
-		DefaultCWD:   "/tmp",
-		TurnTimeout:  time.Second,
-		SessionTTL:   time.Hour,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:     map[string]agentrun.Engine{"pi": fake},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second,
+		SessionTTL:  time.Hour,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 
@@ -551,12 +543,11 @@ func TestGenericACPIntegrationStdio(t *testing.T) {
 	)
 
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"stdio-acp": acpEngine},
-		BackendKinds: map[string]BackendKind{"stdio-acp": BackendGenericACP},
-		DefaultCWD:   t.TempDir(),
-		TurnTimeout:  10 * time.Second,
-		SessionTTL:   time.Hour,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:     map[string]agentrun.Engine{"stdio-acp": acpEngine},
+		DefaultCWD:  t.TempDir(),
+		TurnTimeout: 10 * time.Second,
+		SessionTTL:  time.Hour,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 

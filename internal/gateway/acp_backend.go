@@ -11,17 +11,6 @@ import (
 	"github.com/dmora/agentrun/engine/acp"
 )
 
-// BackendKind distinguishes backend types and special capabilities without
-// coupling to concrete Engine implementation types.
-type BackendKind string
-
-const (
-	BackendGenericACP BackendKind = "acp"
-	BackendCodexACP   BackendKind = "codex-acp"
-	BackendClaude     BackendKind = "claude"
-	BackendCLI        BackendKind = "cli"
-)
-
 // ACPBackendConfig configures a generic ACP backend.
 type ACPBackendConfig struct {
 	ID     string
@@ -41,13 +30,19 @@ func (c ACPBackendConfig) NewEngine(stderr io.Writer) *acp.Engine {
 	)
 }
 
-var builtInEngineIDs = map[string]bool{
-	"claude-code": true,
-	"codex":       true,
-	"agy":         true,
+func validateACPID(id string) error {
+	if id == "" {
+		return errors.New("acp backend ID must not be empty")
+	}
+	if strings.Contains(id, "/") {
+		return fmt.Errorf("acp backend ID %q must not contain '/'", id)
+	}
+	if strings.ContainsAny(id, " \t\r\n:") {
+		return fmt.Errorf("acp backend ID %q contains invalid characters", id)
+	}
+	return nil
 }
 
-// ParseACPBackend parses a single ACP backend specification.
 // Supported formats:
 //   - Standard: id=command [args...]
 //     e.g. "pi=pi-acp", "opencode=opencode acp", "gemini=gemini --experimental-acp"
@@ -163,21 +158,7 @@ func parseStructuredACPBackend(spec string) (ACPBackendConfig, error) {
 	}, nil
 }
 
-func validateACPID(id string) error {
-	if id == "" {
-		return errors.New("acp backend ID must not be empty")
-	}
-	if strings.Contains(id, "/") {
-		return fmt.Errorf("acp backend ID %q must not contain '/'", id)
-	}
-	if strings.ContainsAny(id, " \t\r\n:") {
-		return fmt.Errorf("acp backend ID %q contains invalid characters", id)
-	}
-	if builtInEngineIDs[id] {
-		return fmt.Errorf("acp backend ID %q conflicts with built-in backend ID", id)
-	}
-	return nil
-}
+// ParseACPBackend parses a single ACP backend specification.
 
 // ParseACPBackends parses a list of ACP backend specifications and validates for duplicates.
 func ParseACPBackends(specs []string) ([]ACPBackendConfig, error) {

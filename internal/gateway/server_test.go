@@ -428,7 +428,8 @@ func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
 		{ID: "gpt-test[high]", Name: "GPT Test (high)"},
 	}}
 	server := New(Config{
-		Engines: map[string]agentrun.Engine{"codex": engine},
+		Engines:       map[string]agentrun.Engine{"codex": engine},
+		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
 		ModelDetails: map[string]ModelDetails{
 			"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
 		},
@@ -464,8 +465,10 @@ func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
 		{ID: "gpt-test[high]", Name: "GPT Test (high)"},
 	}}
 	server := New(Config{
-		Engines: map[string]agentrun.Engine{"codex": engine}, DefaultCWD: "/tmp",
-		TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Engines:       map[string]agentrun.Engine{"codex": engine},
+		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
+		DefaultCWD:    "/tmp",
+		TurnTimeout:   time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
@@ -488,8 +491,10 @@ func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
 func TestUnsupportedReasoningEffortRejected(t *testing.T) {
 	engine := &fakeEngine{models: []agentrun.ModelInfo{{ID: "gpt-test[medium]", Name: "GPT Test (medium)"}}}
 	server := New(Config{
-		Engines: map[string]agentrun.Engine{"codex": engine}, DefaultCWD: "/tmp",
-		TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Engines:       map[string]agentrun.Engine{"codex": engine},
+		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
+		DefaultCWD:    "/tmp",
+		TurnTimeout:   time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
@@ -501,14 +506,13 @@ func TestUnsupportedReasoningEffortRejected(t *testing.T) {
 	}
 }
 
-func TestDiscoveryIncludesClaudeAndRetainsLastCatalogOnFailure(t *testing.T) {
+func TestDiscoveryRetainsLastCatalogOnFailure(t *testing.T) {
 	engine := &fakeEngine{models: []agentrun.ModelInfo{
-		{ID: "default", Name: "Default", Aliases: []string{"claude-sonnet-5"}},
 		{ID: "sonnet", Name: "Sonnet", Aliases: []string{"claude-sonnet-5"}},
 	}}
 	server := New(Config{
-		Engines:      map[string]agentrun.Engine{"claude-code": engine},
-		ModelDetails: map[string]ModelDetails{"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000}},
+		Engines:      map[string]agentrun.Engine{"claude": engine},
+		ModelDetails: map[string]ModelDetails{"claude": {Name: "Claude", ContextWindow: 200000, MaxTokens: 32000}},
 		DefaultCWD:   "/tmp", TurnTimeout: time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -517,17 +521,15 @@ func TestDiscoveryIncludesClaudeAndRetainsLastCatalogOnFailure(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	first := httptest.NewRecorder()
 	server.ServeHTTP(first, request)
-	if !strings.Contains(first.Body.String(), `"id":"claude-code/sonnet"`) ||
-		strings.Contains(first.Body.String(), `"id":"claude-code/default"`) ||
-		!strings.Contains(first.Body.String(), `"thinking_level_map"`) {
+	if !strings.Contains(first.Body.String(), `"id":"claude/sonnet"`) {
 		t.Fatalf("first models body = %s", first.Body.String())
 	}
-	chat := doChat(t, server, `{"model":"claude-code/sonnet","reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`, nil)
+	chat := doChat(t, server, `{"model":"claude/sonnet","reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`, nil)
 	if chat.Code != http.StatusOK {
 		t.Fatalf("chat status = %d, body = %s", chat.Code, chat.Body.String())
 	}
 	engine.mu.Lock()
-	if got := engine.sessions[0].Options[agentrun.OptionEffort]; got != "high" {
+	if got := engine.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")]; got != "high" {
 		engine.mu.Unlock()
 		t.Fatalf("Claude effort = %q, want high", got)
 	}
@@ -538,7 +540,7 @@ func TestDiscoveryIncludesClaudeAndRetainsLastCatalogOnFailure(t *testing.T) {
 	engine.mu.Unlock()
 	second := httptest.NewRecorder()
 	server.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
-	if !strings.Contains(second.Body.String(), `"id":"claude-code/sonnet"`) {
+	if !strings.Contains(second.Body.String(), `"id":"claude/sonnet"`) {
 		t.Fatalf("cached models body = %s", second.Body.String())
 	}
 }
@@ -549,8 +551,10 @@ func TestDiscoveredRouteRejectsUnexpectedEffectiveModel(t *testing.T) {
 		effectiveModel: "gpt-other",
 	}
 	server := New(Config{
-		Engines: map[string]agentrun.Engine{"codex": engine}, DefaultCWD: "/tmp",
-		TurnTimeout: time.Second, SessionTTL: time.Hour,
+		Engines:       map[string]agentrun.Engine{"codex": engine},
+		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
+		DefaultCWD:    "/tmp",
+		TurnTimeout:   time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
