@@ -10,10 +10,10 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 
 Model IDs:
 
-- `claude-code`, `codex`, and `agy` leave the model choice to the backend's own default.
-- `claude-code/<model-id>` and `codex/<model-id>` select one explicitly.
+- `claude-code`, `codex`, `agy`, and any configured generic ACP backends leave the model choice to the backend's own default.
+- `claude-code/<model-id>`, `codex/<model-id>`, and `<acp-id>/<model-id>` select one explicitly.
 
-`agy` runs the Antigravity CLI, which advertises no model catalog, so it stays a single entry with no sub-models. Concrete models for the other two are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. Codex effort variants collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model.
+`agy` runs the Antigravity CLI, which advertises no model catalog, so it stays a single entry with no sub-models. Concrete models for the others are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. Codex effort variants collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model. Generic ACP backends publish discovered models directly without effort grouping.
 
 ## Install
 
@@ -51,6 +51,7 @@ The default is `127.0.0.1:8787`. Options:
 --codex-acp-binary codex-acp
 --agy-binary agy
 --codex-acp-args arg1,arg2
+--acp pi=pi-acp
 --turn-timeout 30m
 --session-ttl 10m
 --session-store "/path/to/sessions.json"
@@ -62,7 +63,69 @@ The default is `127.0.0.1:8787`. Options:
 
 `--allowed-root` is repeatable, and equals `AGENTRUN_ALLOWED_ROOTS` using the OS path-list separator. With at least one root set, `X-Agent-CWD` must resolve inside one of them and symlink escapes are rejected; with none, any absolute path is accepted.
 
+`--acp` is repeatable (or configured via `AGENTRUN_ACP`), registering generic ACP backends.
+
 Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity comes from the first of `X-Session-Affinity`, `Session-ID`, the `session_id` header, `X-Client-Request-ID`, or JSON `session_id`. With none present the gateway mints an ID and returns it as `X-Session-ID`.
+
+## Generic ACP backends
+
+Any ACP-compliant agent talking JSON-RPC over stdio can be registered without modifying source code using `--acp`:
+
+```sh
+# Pi ACP
+agentrun-openai --acp pi=pi-acp
+
+# Multiple ACP agents
+agentrun-openai \
+  --acp pi=pi-acp \
+  --acp opencode="opencode acp" \
+  --acp gemini="gemini --experimental-acp"
+```
+
+Command and arguments are passed directly to `exec` without shell interpretation (`/bin/sh -c`). The agent executable must speak the Agent Client Protocol (ACP) via JSON-RPC 2.0 over `stdin`/`stdout`.
+
+### Model namespace
+
+Each generic ACP backend automatically provides an OpenAI model namespace:
+
+```text
+pi
+pi/<model>
+```
+
+For example, if `pi-acp` publishes models `gpt-5.6-sol` and `claude-sonnet-4.6`, `/v1/models` returns:
+
+```text
+pi
+pi/gpt-5.6-sol
+pi/claude-sonnet-4.6
+```
+
+### OpenAI request
+
+Using the base model ID lets the ACP backend choose its default model:
+
+```json
+{
+  "model": "pi",
+  "messages": [
+    {"role": "user", "content": "hello"}
+  ]
+}
+```
+
+Using a submodel ID specifies the model to the ACP backend:
+
+```json
+{
+  "model": "pi/gpt-5.6-sol",
+  "messages": [
+    {"role": "user", "content": "hello"}
+  ]
+}
+```
+
+All existing features — session affinity, `--session-ttl`, idle eviction, native ACP session resume, transcript fingerprinting, `X-Agent-CWD`, streaming, and heartbeat — work identically for all generic ACP backends.
 
 ## Streaming and long tool runs
 

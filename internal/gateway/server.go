@@ -30,6 +30,8 @@ const defaultStreamHeartbeat = 20 * time.Second
 
 type Config struct {
 	Engines      map[string]agentrun.Engine
+	BackendKinds map[string]BackendKind
+	ACPBackends  []ACPBackendConfig
 	ModelDetails map[string]ModelDetails
 	DefaultCWD   string
 	AllowedRoots []string
@@ -56,6 +58,7 @@ type ModelDetails struct {
 type modelRoute struct {
 	engine         agentrun.Engine
 	engineID       string
+	backendKind    BackendKind
 	backendModel   string
 	effectiveIDs   []string
 	effortModels   map[string]string
@@ -86,6 +89,26 @@ func New(config Config) *Server {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
+	if config.BackendKinds == nil {
+		config.BackendKinds = make(map[string]BackendKind)
+	}
+	if config.ModelDetails == nil {
+		config.ModelDetails = make(map[string]ModelDetails)
+	}
+	if config.Engines == nil {
+		config.Engines = make(map[string]agentrun.Engine)
+	}
+	for _, b := range config.ACPBackends {
+		if config.Engines[b.ID] == nil {
+			config.Engines[b.ID] = b.NewEngine(nil)
+		}
+		if _, ok := config.BackendKinds[b.ID]; !ok {
+			config.BackendKinds[b.ID] = BackendGenericACP
+		}
+		if _, ok := config.ModelDetails[b.ID]; !ok {
+			config.ModelDetails[b.ID] = ModelDetails{Name: b.ID}
+		}
+	}
 	models := make([]string, 0, len(config.Engines))
 	for model := range config.Engines {
 		models = append(models, model)
@@ -98,6 +121,22 @@ func New(config Config) *Server {
 	s := &Server{config: config, models: models, registry: registry, routes: make(map[string]modelRoute), stop: make(chan struct{})}
 	go s.janitor()
 	return s
+}
+
+func (s *Server) backendKind(id string) BackendKind {
+	if s.config.BackendKinds != nil {
+		if kind, ok := s.config.BackendKinds[id]; ok {
+			return kind
+		}
+	}
+	switch id {
+	case "codex":
+		return BackendCodexACP
+	case "claude-code":
+		return BackendClaude
+	default:
+		return BackendGenericACP
+	}
 }
 
 func (s *Server) Close() {
@@ -156,7 +195,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	data := make([]map[string]any, 0, len(s.models)+len(discovered))
 	for _, model := range s.models {
 		var efforts []string
-		if model == "claude-code" {
+		if s.backendKind(model) == BackendClaude {
 			efforts = []string{"low", "medium", "high"}
 		}
 		data = append(data, modelObject(model, s.config.ModelDetails[model], efforts))
@@ -232,8 +271,9 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 		}
 
 		base := s.config.ModelDetails[engineID]
+		kind := s.backendKind(engineID)
 		fresh := make(map[string]modelRoute, len(models))
-		if engineID == "codex" {
+		if kind == BackendCodexACP {
 			fresh = groupedCodexRoutes(engineID, engine, base, models)
 		} else {
 			for _, model := range models {
@@ -241,7 +281,7 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 				if modelID == "" {
 					continue
 				}
-				if engineID == "claude-code" && modelID == "default" {
+				if kind == BackendClaude && modelID == "default" {
 					continue
 				}
 				id := engineID + "/" + modelID
@@ -256,7 +296,14 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 					details.Name = name
 				}
 				effectiveIDs := append([]string{modelID}, model.Aliases...)
-				fresh[id] = modelRoute{engine: engine, engineID: engineID, backendModel: modelID, effectiveIDs: effectiveIDs, details: details}
+				fresh[id] = modelRoute{
+					engine:       engine,
+					engineID:     engineID,
+					backendKind:  kind,
+					backendModel: modelID,
+					effectiveIDs: effectiveIDs,
+					details:      details,
+				}
 			}
 		}
 
@@ -279,7 +326,7 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 		for effort := range route.effortModels {
 			efforts = append(efforts, effort)
 		}
-		if route.engineID == "claude-code" {
+		if route.backendKind == BackendClaude {
 			efforts = []string{"low", "medium", "high"}
 		} else {
 			sortEfforts(efforts)
@@ -326,7 +373,7 @@ func groupedCodexRoutes(engineID string, engine agentrun.Engine, base ModelDetai
 				details.Name = name
 			}
 			routes[engineID+"/"+modelID] = modelRoute{
-				engine: engine, engineID: engineID, backendModel: modelID,
+				engine: engine, engineID: engineID, backendKind: BackendCodexACP, backendModel: modelID,
 				effectiveIDs: append([]string{modelID}, model.Aliases...), details: details,
 			}
 			continue
@@ -345,7 +392,7 @@ func groupedCodexRoutes(engineID string, engine agentrun.Engine, base ModelDetai
 			} else {
 				details.Name = name
 			}
-			route = modelRoute{engine: engine, engineID: engineID, details: details, effortModels: make(map[string]string)}
+			route = modelRoute{engine: engine, engineID: engineID, backendKind: BackendCodexACP, details: details, effortModels: make(map[string]string)}
 		}
 		route.effortModels[effort] = modelID
 		route.backendModel = baseID
@@ -373,7 +420,12 @@ func splitEffortModelID(id string) (string, string, bool) {
 
 func (s *Server) resolveModel(id string) (modelRoute, bool) {
 	if engine := s.config.Engines[id]; engine != nil {
-		return modelRoute{engine: engine, engineID: id, details: s.config.ModelDetails[id]}, true
+		return modelRoute{
+			engine:      engine,
+			engineID:    id,
+			backendKind: s.backendKind(id),
+			details:     s.config.ModelDetails[id],
+		}, true
 	}
 	s.routesMu.RLock()
 	route, ok := s.routes[id]
@@ -389,7 +441,12 @@ func (s *Server) resolveModel(id string) (modelRoute, bool) {
 	if engine == nil {
 		return modelRoute{}, false
 	}
-	return modelRoute{engine: engine, engineID: engineID, backendModel: backendModel}, true
+	return modelRoute{
+		engine:       engine,
+		engineID:     engineID,
+		backendKind:  s.backendKind(engineID),
+		backendModel: backendModel,
+	}, true
 }
 
 func selectReasoningEffort(route modelRoute, requested string) (modelRoute, error) {
@@ -417,7 +474,7 @@ func selectReasoningEffort(route modelRoute, requested string) (modelRoute, erro
 		route.selectedEffort = requested
 		return route, nil
 	}
-	if requested != "" && route.engineID == "claude-code" {
+	if requested != "" && route.backendKind == BackendClaude {
 		if requested != "low" && requested != "medium" && requested != "high" {
 			return modelRoute{}, fmt.Errorf("reasoning_effort %q is not available for Claude Code", requested)
 		}
@@ -525,13 +582,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
-		if route.engineID == "claude-code" && s.config.ClaudeThinkingBudget > 0 {
+		if route.backendKind == BackendClaude && s.config.ClaudeThinkingBudget > 0 {
 			options[agentrun.OptionThinkingBudget] = strconv.Itoa(s.config.ClaudeThinkingBudget)
 		}
 		if route.selectedEffort != "" {
-			if route.engineID == "codex" {
+			if route.backendKind == BackendCodexACP {
 				options[acpengine.SessionConfigOption("reasoning_effort")] = route.selectedEffort
-			} else if route.engineID == "claude-code" {
+			} else if route.backendKind == BackendClaude {
 				options[agentrun.OptionEffort] = route.selectedEffort
 			}
 		}

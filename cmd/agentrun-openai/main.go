@@ -38,6 +38,7 @@ func main() {
 
 func run() error {
 	allowedRoots := pathListFlag(splitPathList(os.Getenv("AGENTRUN_ALLOWED_ROOTS")))
+	var acpFlags acpFlagList
 	var (
 		host           = flag.String("host", env("AGENTRUN_HOST", "127.0.0.1"), "HTTP listen host")
 		port           = flag.Int("port", envInt("AGENTRUN_PORT", 8787), "HTTP listen port")
@@ -56,6 +57,7 @@ func run() error {
 		showVersion    = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Var(&allowedRoots, "allowed-root", "allowed agent working-directory root (repeatable; empty allows any absolute path)")
+	flag.Var(&acpFlags, "acp", "generic ACP backend specification: id=command [args...] (repeatable)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -71,6 +73,15 @@ func run() error {
 	resolvedRoots, err := resolveRoots(allowedRoots)
 	if err != nil {
 		return err
+	}
+
+	specs := []string(acpFlags)
+	if len(specs) == 0 {
+		specs = splitACPList(os.Getenv("AGENTRUN_ACP"))
+	}
+	acpBackends, err := gateway.ParseACPBackends(specs)
+	if err != nil {
+		return fmt.Errorf("configure acp backends: %w", err)
 	}
 
 	if *defaultCWD == "" {
@@ -89,15 +100,27 @@ func run() error {
 			acp.WithStderrWriter(os.Stderr),
 		),
 	}
+	backendKinds := map[string]gateway.BackendKind{
+		"claude-code": gateway.BackendClaude,
+		"codex":       gateway.BackendCodexACP,
+		"agy":         gateway.BackendCLI,
+	}
+	modelDetails := map[string]gateway.ModelDetails{
+		"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000},
+		"codex":       {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
+		"agy":         {Name: "Antigravity", ContextWindow: 200000, MaxTokens: 32000},
+	}
+	for _, b := range acpBackends {
+		engines[b.ID] = b.NewEngine(os.Stderr)
+		backendKinds[b.ID] = gateway.BackendGenericACP
+		modelDetails[b.ID] = gateway.ModelDetails{Name: b.ID}
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	handler := gateway.New(gateway.Config{
-		Engines: engines,
-		ModelDetails: map[string]gateway.ModelDetails{
-			"claude-code": {Name: "Claude Code", ContextWindow: 200000, MaxTokens: 32000},
-			"codex":       {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
-			"agy":         {Name: "Antigravity", ContextWindow: 200000, MaxTokens: 32000},
-		},
+		Engines:              engines,
+		BackendKinds:         backendKinds,
+		ModelDetails:         modelDetails,
 		DefaultCWD:           *defaultCWD,
 		AllowedRoots:         resolvedRoots,
 		APIKey:               *apiKey,
@@ -150,6 +173,34 @@ func (f *pathListFlag) Set(value string) error {
 	}
 	*f = append(*f, value)
 	return nil
+}
+
+type acpFlagList []string
+
+func (f *acpFlagList) String() string { return strings.Join(*f, "; ") }
+
+func (f *acpFlagList) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("acp backend specification must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
+func splitACPList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var result []string
+	for _, entry := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\n' || r == ';'
+	}) {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			result = append(result, entry)
+		}
+	}
+	return result
 }
 
 func splitPathList(value string) []string {
