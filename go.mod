@@ -14,4 +14,4 @@ require (
 	golang.org/x/sys v0.40.0 // indirect
 )
 
-replace github.com/dmora/agentrun => github.com/mytecor/agentrun v0.9.1-0.20261006162746-4d78dfab82fd
+replace github.com/dmora/agentrun => github.com/mytecor/agentrun v0.9.1-0.20261006200631-e07f67cf8aca
