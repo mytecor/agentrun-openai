@@ -10,10 +10,10 @@ An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://git
 
 Model IDs:
 
-- `<backend-id>` leaves the model choice to the backend's own default.
+- `<backend-id>` leaves the model choice to the backend's own default and does not advertise or accept `reasoning_effort`; select a concrete model to choose effort.
 - `<backend-id>/<model-id>` selects one explicitly.
 
-Concrete models for configured ACP backends are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. With `--effort-format <backend>=bracket` (or `--effort-format <backend>=codex`), effort variants (e.g. `gpt-5[low]`, `gpt-5[medium]`) collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field (`low`, `medium`, `high`, `xhigh`, `max`; default `medium`), which is sent separately from the model.
+Concrete models for configured ACP backends are discovered from agentrun's model-catalog API on every `/models` request; if discovery fails the last known catalog is kept, and the backend-default IDs always work. By default, effort variants (e.g. `gpt-5[low]`, `gpt-5[medium]`) collapse into one entry per base model — pick the level through the OpenAI `reasoning_effort` field using an exact value from `reasoning_efforts`; the selected bracketed model ID is sent to ACP. If omitted, the first variant in the backend catalog is selected.
 
 ## Install
 
@@ -38,7 +38,6 @@ The server runs as the current user, so the agent CLIs must be on that user's `P
 ```sh
 agentrun-openai \
   --acp codex="npx @agentclientprotocol/codex-acp" \
-  --effort-format codex=bracket \
   --acp claude="npx @agentclientprotocol/claude-agent-acp"
 ```
 
@@ -51,7 +50,6 @@ The default is `127.0.0.1:8787`. Options:
 --default-cwd /absolute/path/to/project
 --allowed-root /absolute/path/to/projects
 --acp codex="npx @agentclientprotocol/codex-acp"
---effort-format codex=bracket
 --turn-timeout 30m
 --session-ttl 10m
 --session-store "/path/to/sessions.json"
@@ -64,7 +62,6 @@ The default is `127.0.0.1:8787`. Options:
 
 `--acp` is repeatable (or configured via `AGENTRUN_ACP`), registering ACP backends.
 
-`--effort-format` is repeatable (or configured via `AGENTRUN_EFFORT_FORMAT`), specifying reasoning effort parsing (`bracket`, `codex`, or `none`).
 
 Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity comes from the first of `X-Session-Affinity`, `Session-ID`, the `session_id` header, `X-Client-Request-ID`, or JSON `session_id`. With none present the gateway mints an ID and returns it as `X-Session-ID`.
 
@@ -73,15 +70,13 @@ Every request may set `X-Agent-CWD` to an absolute project directory. Session af
 Any ACP-compliant agent talking JSON-RPC over stdio can be registered without modifying source code using `--acp`:
 
 ```sh
-# OpenAI Codex adapter with bracket effort parsing
+# OpenAI Codex adapter with automatic effort detection
 agentrun-openai \
-  --acp codex="npx @agentclientprotocol/codex-acp" \
-  --effort-format codex=bracket
+  --acp codex="npx @agentclientprotocol/codex-acp"
 
 # Multiple ACP agents
 agentrun-openai \
   --acp codex="npx @agentclientprotocol/codex-acp" \
-  --effort-format codex=bracket \
   --acp claude="npx @agentclientprotocol/claude-agent-acp" \
   --acp pi=pi-acp \
   --acp opencode="opencode acp"
@@ -89,14 +84,11 @@ agentrun-openai \
 
 Command and arguments are passed directly to `exec` without shell interpretation (`/bin/sh -c`). The agent executable must speak the Agent Client Protocol (ACP) via JSON-RPC 2.0 over `stdin`/`stdout`.
 
-### Reasoning effort format (`--effort-format`)
+### Automatic reasoning effort detection
 
-Adapters such as `@agentclientprotocol/codex-acp` expose reasoning effort variations as bracketed model IDs (e.g. `o3-mini[low]`, `o3-mini[medium]`, `o3-mini[high]`).
+Adapters such as `@agentclientprotocol/codex-acp` expose effort variants as bracketed model IDs (e.g. `o3-mini[low]`, `o3-mini[medium]`, `o3-mini[high]`). The gateway automatically groups these into one base model in `/v1/models` with `reasoning_efforts`, regardless of the backend name. Any nonempty bracketed effort value is accepted, preserving its spelling and case. Models without a valid bracket suffix remain unchanged.
 
-Using `--effort-format`:
-- `codex=bracket` (or `--effort-format=codex`): collapses bracketed model names in `/v1/models` into single base models (`o3-mini`) with `reasoning_efforts: ["low", "medium", "high", ...]`.
-- In chat requests, passing `"reasoning_effort": "high"` automatically routes to the corresponding variant and passes `session_config.reasoning_effort` to the ACP session.
-- `none` (default): models are published directly without grouping.
+In chat requests, `"reasoning_effort": "high"` selects the corresponding bracketed model variant. No additional configuration is needed. Values and per-model order come from the catalog; `thinking_level_map` contains only those values, without aliases. A default effort is not advertised because the catalog API does not provide one. Requests with an explicit effort for a model without advertised effort variants are rejected.
 
 ### Model namespace
 

@@ -60,21 +60,3 @@ func TestACPFlagList(t *testing.T) {
 		t.Fatal("expected error on empty flag value")
 	}
 }
-
-func TestEffortFormatFlagList(t *testing.T) {
-	var list effortFormatFlagList
-	if err := list.Set("codex=bracket"); err != nil {
-		t.Fatal(err)
-	}
-	if err := list.Set("bracket"); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"codex=bracket", "bracket"}
-	if !reflect.DeepEqual([]string(list), want) {
-		t.Fatalf("list = %#v, want %#v", list, want)
-	}
-
-	if err := list.Set("  "); err == nil {
-		t.Fatal("expected error on empty flag value")
-	}
-}

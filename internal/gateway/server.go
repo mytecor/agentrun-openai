@@ -18,7 +18,6 @@ import (
 	"unicode"
 
 	"github.com/dmora/agentrun"
-	acpengine "github.com/dmora/agentrun/engine/acp"
 )
 
 // defaultStreamHeartbeat keeps streams alive through long tool-only stretches.
@@ -28,17 +27,14 @@ import (
 const defaultStreamHeartbeat = 20 * time.Second
 
 type Config struct {
-	Engines             map[string]agentrun.Engine
-	EffortFormats       map[string]EffortFormat
-	DefaultEffortFormat EffortFormat
-	ACPBackends         []ACPBackendConfig
-	ModelDetails        map[string]ModelDetails
-	DefaultCWD          string
-	AllowedRoots        []string
-	APIKey              string
-	TurnTimeout         time.Duration
-	SessionTTL          time.Duration
-	SessionStore        string
+	Engines      map[string]agentrun.Engine
+	ModelDetails map[string]ModelDetails
+	DefaultCWD   string
+	AllowedRoots []string
+	APIKey       string
+	TurnTimeout  time.Duration
+	SessionTTL   time.Duration
+	SessionStore string
 	// StreamHeartbeat is how long a stream may stay silent before a keep-alive
 	// delta is emitted. Zero selects the default; negative disables it.
 	StreamHeartbeat time.Duration
@@ -51,12 +47,17 @@ type ModelDetails struct {
 	MaxTokens     int
 }
 
+type effortVariant struct {
+	effort  string
+	modelID string
+}
+
 type modelRoute struct {
 	engine         agentrun.Engine
 	engineID       string
 	backendModel   string
 	effectiveIDs   []string
-	effortModels   map[string]string
+	effortVariants []effortVariant
 	selectedEffort string
 	details        ModelDetails
 }
@@ -84,22 +85,12 @@ func New(config Config) *Server {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	if config.EffortFormats == nil {
-		config.EffortFormats = make(map[string]EffortFormat)
-	}
+
 	if config.ModelDetails == nil {
 		config.ModelDetails = make(map[string]ModelDetails)
 	}
 	if config.Engines == nil {
 		config.Engines = make(map[string]agentrun.Engine)
-	}
-	for _, b := range config.ACPBackends {
-		if config.Engines[b.ID] == nil {
-			config.Engines[b.ID] = b.NewEngine(nil)
-		}
-		if _, ok := config.ModelDetails[b.ID]; !ok {
-			config.ModelDetails[b.ID] = ModelDetails{Name: b.ID}
-		}
 	}
 	models := make([]string, 0, len(config.Engines))
 	for model := range config.Engines {
@@ -113,18 +104,6 @@ func New(config Config) *Server {
 	s := &Server{config: config, models: models, registry: registry, routes: make(map[string]modelRoute), stop: make(chan struct{})}
 	go s.janitor()
 	return s
-}
-
-func (s *Server) effortFormat(id string) EffortFormat {
-	if s.config.EffortFormats != nil {
-		if format, ok := s.config.EffortFormats[id]; ok {
-			return format
-		}
-	}
-	if s.config.DefaultEffortFormat != "" {
-		return s.config.DefaultEffortFormat
-	}
-	return EffortFormatNone
 }
 
 func (s *Server) Close() {
@@ -182,24 +161,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	discovered := s.discoverModels(r.Context())
 	data := make([]map[string]any, 0, len(s.models)+len(discovered))
 	for _, model := range s.models {
-		var efforts []string
-		if s.effortFormat(model) == EffortFormatBracket {
-			effortSet := make(map[string]bool)
-			s.routesMu.RLock()
-			for _, route := range s.routes {
-				if route.engineID == model {
-					for eff := range route.effortModels {
-						effortSet[eff] = true
-					}
-				}
-			}
-			s.routesMu.RUnlock()
-			for eff := range effortSet {
-				efforts = append(efforts, eff)
-			}
-			sortEfforts(efforts)
-		}
-		data = append(data, modelObject(model, s.config.ModelDetails[model], efforts))
+		data = append(data, modelObject(model, s.config.ModelDetails[model], nil))
 	}
 	for _, model := range discovered {
 		data = append(data, modelObject(model.id, model.details, model.efforts))
@@ -220,30 +182,14 @@ func modelObject(id string, details ModelDetails, efforts []string) map[string]a
 	if len(efforts) > 0 {
 		result["reasoning_efforts"] = efforts
 		result["thinking_level_map"] = thinkingLevelMap(efforts)
-		if contains(efforts, "medium") {
-			result["default_reasoning_effort"] = "medium"
-		}
 	}
 	return result
 }
 
 func thinkingLevelMap(efforts []string) map[string]any {
-	available := make(map[string]bool, len(efforts))
+	result := make(map[string]any, len(efforts))
 	for _, effort := range efforts {
-		available[effort] = true
-	}
-	result := make(map[string]any, 6)
-	for _, level := range []string{"low", "medium", "high", "xhigh", "max"} {
-		if available[level] {
-			result[level] = level
-		} else {
-			result[level] = nil
-		}
-	}
-	if available["low"] {
-		result["minimal"] = "low"
-	} else {
-		result["minimal"] = nil
+		result[effort] = effort
 	}
 	return result
 }
@@ -272,37 +218,7 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 		}
 
 		base := s.config.ModelDetails[engineID]
-		format := s.effortFormat(engineID)
-		fresh := make(map[string]modelRoute, len(models))
-		if format == EffortFormatBracket {
-			fresh = groupedBracketRoutes(engineID, engine, base, models)
-		} else {
-			for _, model := range models {
-				modelID := strings.TrimSpace(model.ID)
-				if modelID == "" {
-					continue
-				}
-				id := engineID + "/" + modelID
-				name := strings.TrimSpace(model.Name)
-				if name == "" {
-					name = modelID
-				}
-				details := base
-				if base.Name != "" {
-					details.Name = base.Name + " · " + name
-				} else {
-					details.Name = name
-				}
-				effectiveIDs := append([]string{modelID}, model.Aliases...)
-				fresh[id] = modelRoute{
-					engine:       engine,
-					engineID:     engineID,
-					backendModel: modelID,
-					effectiveIDs: effectiveIDs,
-					details:      details,
-				}
-			}
-		}
+		fresh := groupedBracketRoutes(engineID, engine, base, models)
 
 		s.routesMu.Lock()
 		for id, route := range s.routes {
@@ -319,11 +235,7 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 	s.routesMu.RLock()
 	discovered := make([]discoveredModel, 0, len(s.routes))
 	for id, route := range s.routes {
-		efforts := make([]string, 0, len(route.effortModels))
-		for effort := range route.effortModels {
-			efforts = append(efforts, effort)
-		}
-		sortEfforts(efforts)
+		efforts := route.efforts()
 		discovered = append(discovered, discoveredModel{id: id, details: route.details, efforts: efforts})
 	}
 	s.routesMu.RUnlock()
@@ -331,64 +243,58 @@ func (s *Server) discoverModels(ctx context.Context) []discoveredModel {
 	return discovered
 }
 
-func sortEfforts(efforts []string) {
-	order := map[string]int{"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4, "ultra": 5}
-	sort.Slice(efforts, func(i, j int) bool {
-		left, leftOK := order[efforts[i]]
-		right, rightOK := order[efforts[j]]
-		if leftOK && rightOK {
-			return left < right
-		}
-		if leftOK != rightOK {
-			return leftOK
-		}
-		return efforts[i] < efforts[j]
-	})
+func (route modelRoute) efforts() []string {
+	efforts := make([]string, 0, len(route.effortVariants))
+	for _, variant := range route.effortVariants {
+		efforts = append(efforts, variant.effort)
+	}
+	return efforts
 }
 
 func groupedBracketRoutes(engineID string, engine agentrun.Engine, base ModelDetails, models []agentrun.ModelInfo) map[string]modelRoute {
 	routes := make(map[string]modelRoute)
 	for _, model := range models {
 		modelID := strings.TrimSpace(model.ID)
-		baseID, effort, ok := splitEffortModelID(modelID)
-		if !ok {
-			if modelID == "" {
-				continue
-			}
-			name := strings.TrimSpace(model.Name)
-			if name == "" {
-				name = modelID
-			}
-			details := base
-			if base.Name != "" {
-				details.Name = base.Name + " · " + name
-			} else {
-				details.Name = name
-			}
-			routes[engineID+"/"+modelID] = modelRoute{
-				engine: engine, engineID: engineID, backendModel: modelID,
-				effectiveIDs: append([]string{modelID}, model.Aliases...), details: details,
-			}
+		if modelID == "" {
 			continue
+		}
+		baseID, effort, bracket := splitEffortModelID(modelID)
+		if !bracket {
+			baseID = modelID
 		}
 		id := engineID + "/" + baseID
 		route := routes[id]
-		if route.effortModels == nil {
+		if len(route.effortVariants) == 0 {
 			name := strings.TrimSpace(model.Name)
-			name = strings.TrimSuffix(name, " ("+effort+")")
+			if bracket {
+				name = strings.TrimSuffix(name, " ("+effort+")")
+			}
 			if name == "" {
 				name = baseID
 			}
 			details := base
+			details.Name = name
 			if base.Name != "" {
 				details.Name = base.Name + " · " + name
-			} else {
-				details.Name = name
 			}
-			route = modelRoute{engine: engine, engineID: engineID, details: details, effortModels: make(map[string]string)}
+			route = modelRoute{engine: engine, engineID: engineID, backendModel: baseID, details: details}
+			if !bracket {
+				route.effectiveIDs = append([]string{modelID}, model.Aliases...)
+			}
 		}
-		route.effortModels[effort] = modelID
-		route.backendModel = baseID
+		if bracket {
+			found := false
+			for i, variant := range route.effortVariants {
+				if variant.effort == effort {
+					route.effortVariants[i].modelID = modelID
+					found = true
+					break
+				}
+			}
+			if !found {
+				route.effortVariants = append(route.effortVariants, effortVariant{effort: effort, modelID: modelID})
+			}
+		}
 		routes[id] = route
 	}
 	return routes
@@ -402,13 +308,11 @@ func splitEffortModelID(id string) (string, string, bool) {
 	if open <= 0 || open == len(id)-2 {
 		return "", "", false
 	}
-	effort := id[open+1 : len(id)-1]
-	switch effort {
-	case "low", "medium", "high", "xhigh", "max", "ultra":
-		return id[:open], effort, true
-	default:
+	base, effort := id[:open], id[open+1:len(id)-1]
+	if strings.ContainsAny(base, "[]") || strings.ContainsAny(effort, "[]") || strings.TrimSpace(effort) == "" {
 		return "", "", false
 	}
+	return base, effort, true
 }
 
 func (s *Server) resolveModel(id string) (modelRoute, bool) {
@@ -441,37 +345,22 @@ func (s *Server) resolveModel(id string) (modelRoute, bool) {
 }
 
 func selectReasoningEffort(route modelRoute, requested string) (modelRoute, error) {
-	requested = strings.TrimSpace(strings.ToLower(requested))
-	if requested == "minimal" {
-		requested = "low"
-	}
-	if len(route.effortModels) > 0 {
+	if len(route.effortVariants) > 0 {
 		if requested == "" {
-			requested = "medium"
-			if _, ok := route.effortModels[requested]; !ok {
-				for _, fallback := range []string{"low", "high", "xhigh", "max", "ultra"} {
-					if _, ok := route.effortModels[fallback]; ok {
-						requested = fallback
-						break
-					}
-				}
+			requested = route.effortVariants[0].effort
+		}
+		for _, variant := range route.effortVariants {
+			if variant.effort == requested {
+				route.effectiveIDs = []string{route.backendModel, variant.modelID}
+				route.selectedEffort = requested
+				route.backendModel = variant.modelID
+				return route, nil
 			}
 		}
-		effectiveModel, ok := route.effortModels[requested]
-		if !ok {
-			return modelRoute{}, fmt.Errorf("reasoning_effort %q is not available for this model", requested)
-		}
-		route.effectiveIDs = []string{route.backendModel, effectiveModel}
-		route.selectedEffort = requested
-		return route, nil
+		return modelRoute{}, fmt.Errorf("reasoning_effort %q is not available for this model", requested)
 	}
 	if requested != "" {
-		switch requested {
-		case "low", "medium", "high", "xhigh", "max", "ultra":
-			route.selectedEffort = requested
-		default:
-			return modelRoute{}, fmt.Errorf("reasoning_effort %q is not supported", requested)
-		}
+		return modelRoute{}, fmt.Errorf("reasoning_effort %q cannot be selected: this model has no advertised effort variants", requested)
 	}
 	return route, nil
 }
@@ -493,7 +382,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("model %q was not found", request.Model), "invalid_request_error", "model_not_found")
 		return
 	}
-	if route.backendModel != "" && len(route.effectiveIDs) == 0 && len(route.effortModels) == 0 {
+	if route.backendModel != "" && len(route.effectiveIDs) == 0 && len(route.effortVariants) == 0 {
 		s.discoverModels(r.Context())
 		route, _ = s.resolveModel(request.Model)
 	}
@@ -575,9 +464,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// lets the coding-agent runtime execute its own tools inside the chosen
 		// working directory instead of silently denying every operation.
 		options := map[string]string{agentrun.OptionHITL: string(agentrun.HITLOff)}
-		if route.selectedEffort != "" {
-			options[acpengine.SessionConfigOption("reasoning_effort")] = route.selectedEffort
-		}
+
 		if useResume {
 			options[agentrun.OptionResumeID] = state.resumeID
 		}

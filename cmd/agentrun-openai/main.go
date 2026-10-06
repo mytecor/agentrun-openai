@@ -35,7 +35,6 @@ func main() {
 func run() error {
 	allowedRoots := pathListFlag(splitPathList(os.Getenv("AGENTRUN_ALLOWED_ROOTS")))
 	var acpFlags acpFlagList
-	var effortFlags effortFormatFlagList
 	var (
 		host          = flag.String("host", env("AGENTRUN_HOST", "127.0.0.1"), "HTTP listen host")
 		port          = flag.Int("port", envInt("AGENTRUN_PORT", 8787), "HTTP listen port")
@@ -50,7 +49,6 @@ func run() error {
 	)
 	flag.Var(&allowedRoots, "allowed-root", "allowed agent working-directory root (repeatable; empty allows any absolute path)")
 	flag.Var(&acpFlags, "acp", "generic ACP backend specification: id=command [args...] (repeatable)")
-	flag.Var(&effortFlags, "effort-format", "reasoning effort model parsing format: [id=]format (repeatable; e.g. codex=bracket, bracket, none)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -80,15 +78,6 @@ func run() error {
 		return fmt.Errorf("configure acp backends: %w", err)
 	}
 
-	effortSpecs := []string(effortFlags)
-	if len(effortSpecs) == 0 {
-		effortSpecs = gateway.SplitEffortFormatList(os.Getenv("AGENTRUN_EFFORT_FORMAT"))
-	}
-	effortConfig, err := gateway.ParseEffortFormatSpecs(effortSpecs)
-	if err != nil {
-		return fmt.Errorf("configure effort formats: %w", err)
-	}
-
 	if *defaultCWD == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -105,18 +94,16 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	handler := gateway.New(gateway.Config{
-		Engines:             engines,
-		EffortFormats:       effortConfig.PerBackend,
-		DefaultEffortFormat: effortConfig.Default,
-		ModelDetails:        modelDetails,
-		DefaultCWD:          *defaultCWD,
-		AllowedRoots:        resolvedRoots,
-		APIKey:              *apiKey,
-		TurnTimeout:         *turnTimeout,
-		SessionTTL:          *sessionTTL,
-		SessionStore:        *sessionStore,
-		StreamHeartbeat:     *heartbeat,
-		Logger:              logger,
+		Engines:         engines,
+		ModelDetails:    modelDetails,
+		DefaultCWD:      *defaultCWD,
+		AllowedRoots:    resolvedRoots,
+		APIKey:          *apiKey,
+		TurnTimeout:     *turnTimeout,
+		SessionTTL:      *sessionTTL,
+		SessionStore:    *sessionStore,
+		StreamHeartbeat: *heartbeat,
+		Logger:          logger,
 	})
 	defer handler.Close()
 
@@ -170,19 +157,6 @@ func (f *acpFlagList) Set(value string) error {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return errors.New("acp backend specification must not be empty")
-	}
-	*f = append(*f, value)
-	return nil
-}
-
-type effortFormatFlagList []string
-
-func (f *effortFormatFlagList) String() string { return strings.Join(*f, "; ") }
-
-func (f *effortFormatFlagList) Set(value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return errors.New("effort format specification must not be empty")
 	}
 	*f = append(*f, value)
 	return nil

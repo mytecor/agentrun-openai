@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/dmora/agentrun"
-	acpengine "github.com/dmora/agentrun/engine/acp"
 )
 
 type fakeEngine struct {
@@ -33,6 +32,18 @@ type fakeEngine struct {
 	thinking        bool
 }
 
+func cloneModels(models []agentrun.ModelInfo) []agentrun.ModelInfo {
+	if models == nil {
+		return nil
+	}
+	cloned := make([]agentrun.ModelInfo, len(models))
+	copy(cloned, models)
+	for i := range cloned {
+		cloned[i].Aliases = append([]string(nil), models[i].Aliases...)
+	}
+	return cloned
+}
+
 func (e *fakeEngine) Validate() error { return nil }
 
 func (e *fakeEngine) ListModels(_ context.Context, session agentrun.Session) ([]agentrun.ModelInfo, error) {
@@ -41,7 +52,7 @@ func (e *fakeEngine) ListModels(_ context.Context, session agentrun.Session) ([]
 	if e.listErr != nil {
 		return nil, e.listErr
 	}
-	return agentrun.CloneModelCatalog(e.models), nil
+	return cloneModels(e.models), nil
 }
 
 func (e *fakeEngine) Start(_ context.Context, session agentrun.Session, _ ...agentrun.Option) (agentrun.Process, error) {
@@ -428,8 +439,7 @@ func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
 		{ID: "gpt-test[high]", Name: "GPT Test (high)"},
 	}}
 	server := New(Config{
-		Engines:       map[string]agentrun.Engine{"codex": engine},
-		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
+		Engines: map[string]agentrun.Engine{"codex": engine},
 		ModelDetails: map[string]ModelDetails{
 			"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000},
 		},
@@ -453,9 +463,9 @@ func TestDiscoveredModelRoutesBackendModelAndKeepsEngineAlias(t *testing.T) {
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test" ||
-		engine.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")] != "medium" {
-		t.Fatalf("sessions = %#v, want backend model gpt-test with medium effort", engine.sessions)
+	if len(engine.sessions) != 1 || engine.sessions[0].Model != "gpt-test[low]" ||
+		engine.sessions[0].Options[agentrun.OptionEffort] != "" {
+		t.Fatalf("sessions = %#v, want backend model gpt-test[low] with no effort option", engine.sessions)
 	}
 }
 
@@ -465,10 +475,9 @@ func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
 		{ID: "gpt-test[high]", Name: "GPT Test (high)"},
 	}}
 	server := New(Config{
-		Engines:       map[string]agentrun.Engine{"codex": engine},
-		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
-		DefaultCWD:    "/tmp",
-		TurnTimeout:   time.Second, SessionTTL: time.Hour,
+		Engines:     map[string]agentrun.Engine{"codex": engine},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
@@ -481,9 +490,9 @@ func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
 	}
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	if len(engine.sessions) != 2 || engine.sessions[0].Model != "gpt-test" || engine.sessions[1].Model != "gpt-test" ||
-		engine.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")] != "high" ||
-		engine.sessions[1].Options[acpengine.SessionConfigOption("reasoning_effort")] != "medium" {
+	if len(engine.sessions) != 2 || engine.sessions[0].Model != "gpt-test[high]" || engine.sessions[1].Model != "gpt-test[medium]" ||
+		engine.sessions[0].Options[agentrun.OptionEffort] != "" ||
+		engine.sessions[1].Options[agentrun.OptionEffort] != "" {
 		t.Fatalf("sessions = %#v", engine.sessions)
 	}
 }
@@ -491,10 +500,9 @@ func TestReasoningEffortSelectsCodexVariantAndSeparatesAffinity(t *testing.T) {
 func TestUnsupportedReasoningEffortRejected(t *testing.T) {
 	engine := &fakeEngine{models: []agentrun.ModelInfo{{ID: "gpt-test[medium]", Name: "GPT Test (medium)"}}}
 	server := New(Config{
-		Engines:       map[string]agentrun.Engine{"codex": engine},
-		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
-		DefaultCWD:    "/tmp",
-		TurnTimeout:   time.Second, SessionTTL: time.Hour,
+		Engines:     map[string]agentrun.Engine{"codex": engine},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
@@ -524,16 +532,10 @@ func TestDiscoveryRetainsLastCatalogOnFailure(t *testing.T) {
 	if !strings.Contains(first.Body.String(), `"id":"claude/sonnet"`) {
 		t.Fatalf("first models body = %s", first.Body.String())
 	}
-	chat := doChat(t, server, `{"model":"claude/sonnet","reasoning_effort":"high","messages":[{"role":"user","content":"hello"}]}`, nil)
-	if chat.Code != http.StatusOK {
-		t.Fatalf("chat status = %d, body = %s", chat.Code, chat.Body.String())
+	chat := doChat(t, server, `{"model":"claude/sonnet","reasoning_effort":"custom","messages":[{"role":"user","content":"hello"}]}`, nil)
+	if chat.Code != http.StatusBadRequest || !strings.Contains(chat.Body.String(), "no advertised effort variants") {
+		t.Fatalf("chat = %d %s", chat.Code, chat.Body.String())
 	}
-	engine.mu.Lock()
-	if got := engine.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")]; got != "high" {
-		engine.mu.Unlock()
-		t.Fatalf("Claude effort = %q, want high", got)
-	}
-	engine.mu.Unlock()
 
 	engine.mu.Lock()
 	engine.listErr = errors.New("temporary discovery failure")
@@ -551,10 +553,9 @@ func TestDiscoveredRouteRejectsUnexpectedEffectiveModel(t *testing.T) {
 		effectiveModel: "gpt-other",
 	}
 	server := New(Config{
-		Engines:       map[string]agentrun.Engine{"codex": engine},
-		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
-		DefaultCWD:    "/tmp",
-		TurnTimeout:   time.Second, SessionTTL: time.Hour,
+		Engines:     map[string]agentrun.Engine{"codex": engine},
+		DefaultCWD:  "/tmp",
+		TurnTimeout: time.Second, SessionTTL: time.Hour,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()

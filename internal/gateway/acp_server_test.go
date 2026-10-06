@@ -16,7 +16,6 @@ import (
 
 	"github.com/dmora/agentrun"
 	"github.com/dmora/agentrun/engine/acp"
-	acpengine "github.com/dmora/agentrun/engine/acp"
 )
 
 func init() {
@@ -206,12 +205,12 @@ func TestDiscoveredGenericACPModelsNamespace(t *testing.T) {
 	}
 }
 
-// Test 7: Generic ACP model ID does not undergo Codex effort grouping
-func TestGenericACPNoCodexEffortGrouping(t *testing.T) {
+// Malformed bracket suffixes remain literal model IDs.
+func TestGenericACPMalformedSuffixesRemainLiteral(t *testing.T) {
 	fake := &fakeEngine{
 		models: []agentrun.ModelInfo{
-			{ID: "model-a[high]", Name: "Model A (high)"},
-			{ID: "model-a[medium]", Name: "Model A (medium)"},
+			{ID: "model-a[]", Name: "Model A (high)"},
+			{ID: "model-a[preview", Name: "Model A (medium)"},
 		},
 	}
 	server := New(Config{
@@ -230,11 +229,11 @@ func TestGenericACPNoCodexEffortGrouping(t *testing.T) {
 
 	body := rec.Body.String()
 	// Must contain the literal model IDs with bracket suffixes, NOT collapsed
-	if !strings.Contains(body, `"id":"custom-acp/model-a[high]"`) {
-		t.Errorf("expected literal id custom-acp/model-a[high], got %s", body)
+	if !strings.Contains(body, `"id":"custom-acp/model-a[]"`) {
+		t.Errorf("expected literal id custom-acp/model-a[], got %s", body)
 	}
-	if !strings.Contains(body, `"id":"custom-acp/model-a[medium]"`) {
-		t.Errorf("expected literal id custom-acp/model-a[medium], got %s", body)
+	if !strings.Contains(body, `"id":"custom-acp/model-a[preview"`) {
+		t.Errorf("expected literal id custom-acp/model-a[preview, got %s", body)
 	}
 	// And must NOT have reasoning_efforts attached
 	var resp struct {
@@ -324,13 +323,12 @@ func TestExistingCodexEffortBehaviorNotRegressed(t *testing.T) {
 		},
 	}
 	server := New(Config{
-		Engines:       map[string]agentrun.Engine{"codex": fake},
-		EffortFormats: map[string]EffortFormat{"codex": EffortFormatBracket},
-		ModelDetails:  map[string]ModelDetails{"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000}},
-		DefaultCWD:    "/tmp",
-		TurnTimeout:   time.Second,
-		SessionTTL:    time.Hour,
-		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Engines:      map[string]agentrun.Engine{"codex": fake},
+		ModelDetails: map[string]ModelDetails{"codex": {Name: "Codex", ContextWindow: 200000, MaxTokens: 32000}},
+		DefaultCWD:   "/tmp",
+		TurnTimeout:  time.Second,
+		SessionTTL:   time.Hour,
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	defer server.Close()
 
@@ -353,11 +351,11 @@ func TestExistingCodexEffortBehaviorNotRegressed(t *testing.T) {
 	if len(fake.sessions) != 1 {
 		t.Fatalf("sessions count = %d, want 1", len(fake.sessions))
 	}
-	if got := fake.sessions[0].Options[acpengine.SessionConfigOption("reasoning_effort")]; got != "high" {
-		t.Errorf("codex reasoning_effort option = %q, want high", got)
+	if got := fake.sessions[0].Options[agentrun.OptionEffort]; got != "" {
+		t.Errorf("codex effort option = %q, want empty (effort via model variant)", got)
 	}
-	if fake.sessions[0].Model != "gpt-test" {
-		t.Errorf("codex model = %q, want gpt-test", fake.sessions[0].Model)
+	if fake.sessions[0].Model != "gpt-test[high]" {
+		t.Errorf("codex model = %q, want gpt-test[high]", fake.sessions[0].Model)
 	}
 }
 
@@ -573,5 +571,58 @@ func TestGenericACPIntegrationStdio(t *testing.T) {
 	chatBody := chatResp.Body.String()
 	if !strings.Contains(chatBody, "response from fake acp") {
 		t.Errorf("chat response does not contain fake acp text: %s", chatBody)
+	}
+}
+
+func TestACPAutoEffortDetection(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%v", reverse), func(t *testing.T) {
+			fake := &fakeEngine{models: []agentrun.ModelInfo{
+				{ID: "gpt-test[Budget]"}, {ID: "gpt-test[Deep-v2]"},
+				{ID: "gpt-test"}, {ID: "plain"}, {ID: "literal[]"},
+			}}
+			if reverse {
+				for i, j := 0, len(fake.models)-1; i < j; i, j = i+1, j-1 {
+					fake.models[i], fake.models[j] = fake.models[j], fake.models[i]
+				}
+			}
+			server := New(Config{Engines: map[string]agentrun.Engine{"custom": fake},
+				DefaultCWD: t.TempDir(), TurnTimeout: time.Second, SessionTTL: time.Hour,
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			defer server.Close()
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+			var catalog struct {
+				Data []struct {
+					ID      string   `json:"id"`
+					Efforts []string `json:"reasoning_efforts"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &catalog); err != nil {
+				t.Fatal(err)
+			}
+			seen := map[string]bool{}
+			for _, m := range catalog.Data {
+				seen[m.ID] = true
+				wantEfforts := m.ID == "custom/gpt-test"
+				if (len(m.Efforts) > 0) != wantEfforts {
+					t.Fatalf("unexpected efforts for %s: %v", m.ID, m.Efforts)
+				}
+			}
+			if !seen["custom/plain"] || !seen["custom/literal[]"] || seen["custom/gpt-test[Deep-v2]"] {
+				t.Fatalf("unexpected catalog: %s", rec.Body.String())
+			}
+			{
+				resp := doChat(t, server, `{"model":"custom/gpt-test","reasoning_effort":"Deep-v2","messages":[{"role":"user","content":"hello"}]}`, nil)
+				if resp.Code != http.StatusOK {
+					t.Fatalf("chat: %d %s", resp.Code, resp.Body.String())
+				}
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				if len(fake.sessions) != 1 || fake.sessions[0].Model != "gpt-test[Deep-v2]" {
+					t.Fatalf("unexpected sessions: %+v", fake.sessions)
+				}
+			}
+		})
 	}
 }
