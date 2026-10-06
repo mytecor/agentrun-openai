@@ -12,6 +12,10 @@ import (
 )
 
 type sessionState struct {
+	active       *activeTurn
+	facade       *mcpFacade
+	toolHash     string
+	turnErr      error
 	mu           sync.Mutex
 	process      agentrun.Process
 	history      []transcriptMessage
@@ -98,7 +102,15 @@ func (r *registry) evictIdle() {
 	}
 	r.mu.Unlock()
 	for _, state := range stale {
-		stopProcess(state.process)
+		hadTools := state.facade != nil || state.active != nil
+		state.stop()
+		if hadTools {
+			state.history = nil
+			state.historyCount = 0
+			state.historyHash = ""
+			state.resumeID = ""
+			state.toolHash = ""
+		}
 		state.process = nil
 		state.mu.Unlock()
 	}
@@ -114,7 +126,7 @@ func (r *registry) close() {
 	r.mu.Unlock()
 	for _, state := range states {
 		state.mu.Lock()
-		stopProcess(state.process)
+		state.stop()
 		state.mu.Unlock()
 	}
 }
@@ -126,4 +138,21 @@ func stopProcess(process agentrun.Process) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = process.Stop(ctx)
+}
+
+// stop is called under mu; cancellation unblocks both MCP and ACP before Stop.
+func (s *sessionState) stop() {
+	if s.active != nil {
+		s.active.cancel(context.Canceled)
+	}
+	if s.facade != nil {
+		s.facade.close()
+		s.facade = nil
+	}
+	stopProcess(s.process)
+	s.process = nil
+	if s.active != nil {
+		<-s.active.done
+		s.active = nil
+	}
 }

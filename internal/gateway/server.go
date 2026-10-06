@@ -63,6 +63,8 @@ type modelRoute struct {
 }
 
 type Server struct {
+	ctx      context.Context
+	cancel   context.CancelFunc
 	config   Config
 	models   []string
 	registry *registry
@@ -102,12 +104,14 @@ func New(config Config) *Server {
 		config.Logger.Warn("load session store", "error", err, "path", config.SessionStore)
 	}
 	s := &Server{config: config, models: models, registry: registry, routes: make(map[string]modelRoute), stop: make(chan struct{})}
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 	go s.janitor()
 	return s
 }
 
 func (s *Server) Close() {
 	s.close.Do(func() {
+		s.cancel()
 		close(s.stop)
 		s.registry.close()
 	})
@@ -133,6 +137,10 @@ func (s *Server) janitor() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.ctx.Err() != nil {
+		writeError(w, 503, "server is shutting down", "server_error", "server_closed")
+		return
+	}
 	if !s.authorized(r) {
 		writeError(w, http.StatusUnauthorized, "invalid API key", "authentication_error", "invalid_api_key")
 		return
@@ -391,6 +399,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "reasoning_effort_not_supported")
 		return
 	}
+	tools, toolHash, policy, err := normalizeTools(request.Tools, request.ToolChoice)
+	if err != nil {
+		writeError(w, 400, err.Error(), "invalid_request_error", "invalid_tools")
+		return
+	}
 	messages, err := normalizeMessages(request.Messages)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_messages")
@@ -439,13 +452,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer state.mu.Unlock()
 	state.lastAccess = time.Now()
 
+	if len(tools) > 0 || state.facade != nil || state.active != nil || messages[len(messages)-1].Role == "tool" {
+		s.handleToolChat(w, r, request, messages, route, state, stateKey, cwd, toolHash, tools, policy)
+		return
+	}
 	continuation := state.cwd == cwd && state.matchesHistoryPrefix(messages)
 	resume := state.process == nil && state.resumeID != "" && continuation
 	reset := !continuation || (state.process == nil && !resume)
 	var delta []transcriptMessage
 	if reset {
 		delta = messages
-		stopProcess(state.process)
 		s.clearSession(state, stateKey)
 	} else {
 		delta = messages[state.persistedHistoryCount():]
@@ -458,6 +474,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.config.TurnTimeout)
 	defer cancel()
+	stopCancel := context.AfterFunc(s.ctx, cancel)
+	defer stopCancel()
 	first := state.process == nil
 	start := func(useResume bool, turnPrompt string) error {
 		// This HTTP API cannot relay interactive permission prompts. HITL off
@@ -515,7 +533,6 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	err = run(ctx, state.process, prompt, collector.handle)
 	if err != nil && resume && isMissingNativeSession(err) && collector.text.Len() == 0 {
 		s.logError("native session unavailable during first turn; starting fresh", err, request.Model, sessionID)
-		stopProcess(state.process)
 		s.clearSession(state, stateKey)
 		resume = false
 		prompt, err = turnPrompt(messages)
@@ -568,6 +585,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) clearSession(state *sessionState, stateKey string) {
+	state.stop()
+	state.toolHash = ""
+	state.turnErr = nil
 	state.process = nil
 	state.history = nil
 	state.historyCount = 0

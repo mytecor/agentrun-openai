@@ -1,6 +1,6 @@
 # agentrun-openai
 
-An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://github.com/dmora/agentrun). It exposes complete coding agents as models, keeping their tools, subprocesses, and subagents inside the agent runtime.
+An OpenAI-compatible HTTP gateway over [`github.com/dmora/agentrun`](https://github.com/dmora/agentrun). It exposes ACP agents as models and maps client-provided OpenAI function tools to a session-scoped MCP server. Agents can also use their own native tools, subprocesses, and subagents.
 
 ## Endpoints
 
@@ -64,6 +64,83 @@ The default is `127.0.0.1:8787`. Options:
 
 
 Every request may set `X-Agent-CWD` to an absolute project directory. Session affinity comes from the first of `X-Session-Affinity`, `Session-ID`, the `session_id` header, `X-Client-Request-ID`, or JSON `session_id`. With none present the gateway mints an ID and returns it as `X-Session-ID`.
+
+## Client function calling
+
+Send standard Chat Completions `tools` with `type: "function"`. Each function
+becomes one MCP tool with the same name, description and JSON Schema parameters.
+The ACP agent receives the stdio descriptor through `agentrun.Session.MCPServers`.
+The gateway never executes the functions; the OpenAI client does.
+
+For example, the first request can contain:
+
+```json
+{
+  "model": "my-agent",
+  "session_id": "example-session",
+  "messages": [{"role": "user", "content": "Look up item 42"}],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "lookup_item",
+      "description": "Look up an item by ID",
+      "parameters": {
+        "type": "object",
+        "properties": {"id": {"type": "integer"}},
+        "required": ["id"]
+      }
+    }
+  }]
+}
+```
+
+When the agent calls `lookup_item`, the gateway returns an assistant message with
+`tool_calls` and `finish_reason: "tool_calls"`. Append that exact assistant message
+and a tool result to the conversation, then submit the full history with the same
+model, session affinity, working directory and `tools`:
+
+```json
+{"role": "tool", "tool_call_id": "call_...", "content": "Item 42: available"}
+```
+
+Use the call ID returned by the gateway. If no affinity was supplied initially,
+copy the response's `X-Session-ID` into the next request's `session_id` field or
+`X-Session-Affinity` header. A tool result releases the pending MCP request and
+continues the **same ACP turn**; it never sends another `session/prompt`. Further
+calls can produce more exchanges before the final assistant response with
+`finish_reason: "stop"`. Concurrent MCP calls may be delivered in separate
+responses. Supply a result for every call in the assistant response.
+
+`stream: true` uses the same flow: a complete `delta.tool_calls` (including index,
+ID, name and arguments), `finish_reason: "tool_calls"`, then `data: [DONE]`. The
+ACP turn remains alive after that stream closes. Text before a tool call is
+included in its response; subsequent output belongs to the next response.
+
+`tool_choice` supports `auto` (default), `none`, `required`, and
+`{"type":"function","function":{"name":"lookup_item"}}`. The facade rejects
+calls forbidden by the current choice. Required/named choices also instruct the
+agent to call a tool; if the ACP agent finishes without the required call, the
+gateway returns an API error instead of a successful completion. Choice can be
+updated when submitting tool results, without starting another ACP prompt.
+Schema-constrained argument generation remains the ACP agent's responsibility.
+
+Repeat `tools` on every request. Changes to function definitions recreate the
+native session and facade; JSON object key order and tool list order do not.
+Omitting `tools` means an empty toolset. Unknown, duplicate, stale or incomplete
+tool results return a controlled 4xx error. Correctable result errors leave the
+pending turn available for retry. Changing tools while submitting a result
+cancels the old turn and rejects that result.
+
+The private `__mcp-bridge` mode uses the MCP Go SDK over stdio and a separate
+loopback-only IPC listener with a random token per session. It is not an HTTP
+endpoint on the public gateway. No backend-specific tool definitions or dispatch
+rules are used; system/developer messages do not define MCP tools.
+
+Tool sessions stay in memory and are not resumed across gateway restarts or idle
+eviction. Turn timeout includes time waiting for client tool results. Timeout,
+bridge disconnect, session reset, eviction and shutdown cancel pending calls and
+release their resources. Requests without tools retain the ordinary ACP behavior
+and attach no MCP servers.
 
 ## ACP backends and adapters
 

@@ -19,6 +19,7 @@ import (
 	"github.com/dmora/agentrun"
 
 	"github.com/mytecor/agentrun-openai/internal/gateway"
+	"github.com/mytecor/agentrun-openai/internal/mcpbridge"
 )
 
 // version identifies the build. Release binaries set it with
@@ -33,6 +34,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "__mcp-bridge" {
+		return mcpbridge.Run(context.Background(), os.Args[2:])
+	}
 	allowedRoots := pathListFlag(splitPathList(os.Getenv("AGENTRUN_ALLOWED_ROOTS")))
 	var acpFlags acpFlagList
 	var (
@@ -133,6 +137,7 @@ func run() error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownGrace)
 	defer cancel()
+	handler.Close()
 	return server.Shutdown(shutdownCtx)
 }
 

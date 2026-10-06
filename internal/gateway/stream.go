@@ -24,6 +24,7 @@ type collector struct {
 	id             string
 	created        int64
 	model          string
+	toolCalls      []toolCall
 	text           strings.Builder
 	reasoning      strings.Builder
 	usage          completionUsage
@@ -194,7 +195,10 @@ func (c *collector) resetForFreshSession() {
 
 func (c *collector) writeCompletion() {
 	c.w.Header().Set("Content-Type", "application/json")
-	message := map[string]string{"role": "assistant", "content": c.text.String()}
+	message := map[string]any{"role": "assistant", "content": c.text.String()}
+	if len(c.toolCalls) > 0 {
+		message["tool_calls"] = c.toolCalls
+	}
 	if c.reasoning.Len() > 0 {
 		message["reasoning_content"] = c.reasoning.String()
 	}
@@ -203,7 +207,7 @@ func (c *collector) writeCompletion() {
 		"choices": []any{map[string]any{
 			"index":         0,
 			"message":       message,
-			"finish_reason": "stop",
+			"finish_reason": c.finishReason(),
 		}},
 		"usage": c.usage,
 	}
@@ -216,7 +220,14 @@ func (c *collector) finishStream() {
 	if c.closed {
 		return
 	}
-	reason := "stop"
+	reason := c.finishReason()
+	if len(c.toolCalls) > 0 {
+		calls := make([]map[string]any, 0, len(c.toolCalls))
+		for i, call := range c.toolCalls {
+			calls = append(calls, map[string]any{"index": i, "id": call.ID, "type": call.Type, "function": call.Function})
+		}
+		c.writeChunkLocked(map[string]any{"tool_calls": calls}, nil, nil)
+	}
 	c.writeChunkLocked(map[string]string{}, &reason, &c.usage)
 	fmt.Fprint(c.w, "data: [DONE]\n\n")
 	c.flushLocked()
@@ -237,13 +248,13 @@ func (c *collector) streamError(err error) {
 	c.closed = true
 }
 
-func (c *collector) writeChunk(delta map[string]string, finishReason *string, usage *completionUsage) {
+func (c *collector) writeChunk(delta any, finishReason *string, usage *completionUsage) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.writeChunkLocked(delta, finishReason, usage)
 }
 
-func (c *collector) writeChunkLocked(delta map[string]string, finishReason *string, usage *completionUsage) {
+func (c *collector) writeChunkLocked(delta any, finishReason *string, usage *completionUsage) {
 	if c.closed {
 		return
 	}
@@ -265,4 +276,11 @@ func (c *collector) flushLocked() {
 	if flusher, ok := c.w.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func (c *collector) finishReason() string {
+	if len(c.toolCalls) > 0 {
+		return "tool_calls"
+	}
+	return "stop"
 }

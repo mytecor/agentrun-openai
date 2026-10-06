@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mytecor/agentrun-openai/internal/mcpbridge"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,6 +21,17 @@ import (
 )
 
 func init() {
+	if len(os.Args) > 1 && os.Args[1] == "__mcp-bridge" {
+		if err := mcpbridge.Run(context.Background(), os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	if os.Getenv("TEST_TOOL_ACP") != "" {
+		runToolACP()
+		os.Exit(0)
+	}
 	if os.Getenv("TEST_FAKE_ACP") == "1" {
 		runFakeACP()
 		os.Exit(0)

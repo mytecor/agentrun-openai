@@ -3,21 +3,27 @@ package gateway
 import "encoding/json"
 
 type chatRequest struct {
-	Model           string        `json:"model"`
-	Messages        []chatMessage `json:"messages"`
-	Stream          bool          `json:"stream"`
-	SessionID       string        `json:"session_id,omitempty"`
-	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
+	Tools           []functionTool  `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
+	Model           string          `json:"model"`
+	Messages        []chatMessage   `json:"messages"`
+	Stream          bool            `json:"stream"`
+	SessionID       string          `json:"session_id,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	ToolCalls  []toolCall      `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
 }
 
 type transcriptMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
 }
 
 type completionUsage struct {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -16,15 +17,36 @@ func normalizeMessages(messages []chatMessage) ([]transcriptMessage, error) {
 	for i, message := range messages {
 		role := strings.ToLower(strings.TrimSpace(message.Role))
 		switch role {
-		case "system", "developer", "user", "assistant":
+		case "system", "developer", "user", "assistant", "tool":
 		default:
 			return nil, fmt.Errorf("messages[%d].role %q is not supported", i, message.Role)
 		}
-		content, err := textContent(message.Content)
+		if len(message.ToolCalls) > 0 && role != "assistant" {
+			return nil, fmt.Errorf("tool_calls requires role assistant")
+		}
+		if (role == "tool") != (message.ToolCallID != "") {
+			return nil, fmt.Errorf("role tool requires tool_call_id; other roles must omit it")
+		}
+		calls := append([]toolCall(nil), message.ToolCalls...)
+		seen := map[string]bool{}
+		for j := range calls {
+			call := &calls[j]
+			raw, e := canonicalJSON([]byte(call.Function.Arguments))
+			if call.ID == "" || seen[call.ID] || call.Type != "function" || !functionName.MatchString(call.Function.Name) || e != nil || len(raw) == 0 || raw[0] != '{' {
+				return nil, fmt.Errorf("invalid assistant tool call")
+			}
+			seen[call.ID] = true
+			call.Function.Arguments = string(raw)
+		}
+		raw := message.Content
+		if role == "assistant" && len(calls) > 0 && (len(raw) == 0 || string(raw) == "null") {
+			raw = json.RawMessage(`""`)
+		}
+		content, err := textContent(raw)
 		if err != nil {
 			return nil, fmt.Errorf("messages[%d].content: %w", i, err)
 		}
-		result = append(result, transcriptMessage{Role: role, Content: content})
+		result = append(result, transcriptMessage{Role: role, Content: content, ToolCalls: calls, ToolCallID: message.ToolCallID})
 	}
 	return result, nil
 }
@@ -59,7 +81,7 @@ func hasPrefix(messages, prefix []transcriptMessage) bool {
 		return false
 	}
 	for i := range prefix {
-		if messages[i] != prefix[i] {
+		if !reflect.DeepEqual(messages[i], prefix[i]) {
 			return false
 		}
 	}
@@ -77,9 +99,20 @@ func systemPrompt(messages []transcriptMessage) string {
 }
 
 func turnPrompt(messages []transcriptMessage) (string, error) {
+	// Check the actual boundary before filtering native tool history. Otherwise
+	// a trailing assistant tool call could accidentally resend an earlier user.
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "system" || messages[i].Role == "developer" {
+			continue
+		}
+		if messages[i].Role != "user" {
+			return "", errors.New("the last non-system message must have role user")
+		}
+		break
+	}
 	filtered := make([]transcriptMessage, 0, len(messages))
 	for _, message := range messages {
-		if message.Role != "system" && message.Role != "developer" {
+		if message.Role != "system" && message.Role != "developer" && message.Role != "tool" && len(message.ToolCalls) == 0 {
 			filtered = append(filtered, message)
 		}
 	}
